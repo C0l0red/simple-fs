@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn main() {
     println!("Hello, world!");
@@ -17,6 +17,7 @@ const BLOCK_SIZE: u32 = 512;
 const TOTAL_BLOCKS: u32 = 16;
 
 #[derive(Debug)]
+#[derive(PartialEq)]
 enum Error {
     Validation(String),
     IO(String),
@@ -26,13 +27,6 @@ impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Error::IO(err.to_string())
     }
-}
-
-trait Disk {
-    fn mount(path: &Path, size: u64, block_index: u64, magic_number: u64) -> Result<Self, Error>
-    where
-        Self: Sized;
-    fn format_disk(file: File, block_index: u32, magic_number: u32) -> Result<(), Error>;
 }
 
 trait BlockDevice {
@@ -48,7 +42,7 @@ struct ImgFileDisk {
     total_blocks: u32,
 }
 
-pub struct MyFS<D: BlockDevice> {
+struct MyFS<D: BlockDevice> {
     device: D,
     superblock: Superblock,
     inode_bitmap: Bitmap,
@@ -306,7 +300,7 @@ impl BlockDevice for ImgFileDisk {
 }
 
 impl<D: BlockDevice> MyFS<D> {
-    pub fn mount(mut device: D) -> Result<Self, Error> {
+     fn mount(mut device: D) -> Result<Self, Error> {
         // read superblock
         // validate magic
         // load bitmaps
@@ -314,7 +308,7 @@ impl<D: BlockDevice> MyFS<D> {
         todo!()
     }
 
-    pub fn format(mut device: D) -> Result<(), Error> {
+     fn format(mut device: D) -> Result<(), Error> {
         let mut buffer = vec![0u8; device.block_size() as usize];
 
         // Write superblock
@@ -386,7 +380,10 @@ impl<D: BlockDevice> MyFS<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Bitmap, BytesSerializable, MAGIC_NUMBER, Superblock, BLOCK_SIZE, TOTAL_BLOCKS, INODE_COUNT, INODE_SIZE};
+    use crate::{Bitmap, BlockDevice, BytesSerializable, Error, ImgFileDisk, Superblock, BLOCK_SIZE, INODE_COUNT, INODE_SIZE, MAGIC_NUMBER, TOTAL_BLOCKS};
+    use std::fs;
+    use std::io::Write;
+    use std::path::Path;
 
     #[test]
     fn serialize_superblock_to_bytes() {
@@ -441,5 +438,108 @@ mod tests {
         let bitmap = Bitmap::create_and_occupy_first_n_bits( 4);
         assert_eq!(bitmap[0], 0b1111);
         assert_eq!(bitmap[1], 0b0000);
+    }
+
+    #[test]
+    fn img_file_disk_open_valid_file() {
+        let path = Path::new("test_disk.img");
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        drop(file);
+
+        let result = ImgFileDisk::open(path);
+        assert!(result.is_ok());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn img_file_disk_open_file_not_found() {
+        let path = Path::new("nonexistent.img");
+        let result = ImgFileDisk::open(path);
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), Error::IO("Disk file not found".to_string()));
+    }
+
+    #[test]
+    fn img_file_disk_open_invalid_extension() {
+        let path = Path::new("test_disk.txt");
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        drop(file);
+
+        let result = ImgFileDisk::open(path);
+        assert!(result.is_err());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn img_file_disk_read_block() {
+        let path = Path::new("test_read.img");
+        let mut file = fs::File::create(path).unwrap();
+        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
+        data[BLOCK_SIZE as usize] = 0xAB;
+        data[BLOCK_SIZE as usize + 1] = 0xCD;
+        file.write_all(&data).unwrap();
+        drop(file);
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let result = disk.read_block(1, &mut buffer);
+
+        assert!(result.is_ok());
+        assert_eq!(buffer[0], 0xAB);
+        assert_eq!(buffer[1], 0xCD);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn img_file_disk_write_block() {
+        let path = Path::new("test_write.img");
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        drop(file);
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        buffer[0..4].copy_from_slice(&data);
+
+        let write_result = disk.write_block(2, &buffer);
+        assert!(write_result.is_ok());
+
+        let mut read_buffer = vec![0u8; BLOCK_SIZE as usize];
+        disk.read_block(2, &mut read_buffer).unwrap();
+        assert_eq!(read_buffer[0..4], data[..]);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn img_file_disk_block_size() {
+        let path = Path::new("test_blocksize.img");
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        drop(file);
+
+        let disk = ImgFileDisk::open(path).unwrap();
+        assert_eq!(disk.block_size(), BLOCK_SIZE);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn img_file_disk_total_blocks() {
+        let path = Path::new("test_total_blocks.img");
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        drop(file);
+
+        let disk = ImgFileDisk::open(path).unwrap();
+        assert_eq!(disk.total_blocks(), TOTAL_BLOCKS);
+
+        fs::remove_file(path).unwrap();
     }
 }
