@@ -16,8 +16,7 @@ const INODE_SIZE: u32 = 9;
 const BLOCK_SIZE: u32 = 512;
 const TOTAL_BLOCKS: u32 = 16;
 
-#[derive(Debug)]
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Error {
     Validation(String),
     IO(String),
@@ -72,7 +71,7 @@ struct Inode {
 }
 
 #[repr(u8)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum InodeKind {
     File = 0u8,
     Directory = 1u8,
@@ -300,7 +299,7 @@ impl BlockDevice for ImgFileDisk {
 }
 
 impl<D: BlockDevice> MyFS<D> {
-     fn mount(mut device: D) -> Result<Self, Error> {
+    fn mount(mut device: D) -> Result<Self, Error> {
         // read superblock
         // validate magic
         // load bitmaps
@@ -308,7 +307,16 @@ impl<D: BlockDevice> MyFS<D> {
         todo!()
     }
 
-     fn format(mut device: D) -> Result<(), Error> {
+    fn format(device: &mut D) -> Result<(), Error> {
+        // Replace all blocks with zeros
+        let total_blocks = device.total_blocks();
+        for block_index in 0..total_blocks {
+            device.write_block(
+                block_index,
+                vec![0u8; device.block_size() as usize].as_slice(),
+            )?;
+        }
+
         let mut buffer = vec![0u8; device.block_size() as usize];
 
         // Write superblock
@@ -380,7 +388,10 @@ impl<D: BlockDevice> MyFS<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Bitmap, BlockDevice, BytesSerializable, Error, ImgFileDisk, Superblock, BLOCK_SIZE, INODE_COUNT, INODE_SIZE, MAGIC_NUMBER, TOTAL_BLOCKS};
+    use crate::{
+        BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, Error, INODE_COUNT, INODE_SIZE,
+        ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS,
+    };
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -417,7 +428,10 @@ mod tests {
 
     #[test]
     fn deserialize_superblock_from_bytes() {
-        let mut buffer: Vec<u8> = vec![83, 70, 89, 77, 1, 0, 0, 0, 0, 2, 0, 0, 16, 0, 0, 0, 8, 0, 0, 0, 9, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0];
+        let mut buffer: Vec<u8> = vec![
+            83, 70, 89, 77, 1, 0, 0, 0, 0, 2, 0, 0, 16, 0, 0, 0, 8, 0, 0, 0, 9, 0, 0, 0, 1, 0, 0,
+            0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0,
+        ];
         buffer.resize(BLOCK_SIZE as usize, 0u8);
         let superblock = Superblock::try_from_bytes(&buffer).unwrap();
 
@@ -435,7 +449,7 @@ mod tests {
 
     #[test]
     fn create_bitmap_and_occupy_first_n_bits() {
-        let bitmap = Bitmap::create_and_occupy_first_n_bits( 4);
+        let bitmap = Bitmap::create_and_occupy_first_n_bits(4);
         assert_eq!(bitmap[0], 0b1111);
         assert_eq!(bitmap[1], 0b0000);
     }
@@ -444,7 +458,8 @@ mod tests {
     fn img_file_disk_open_valid_file() {
         let path = Path::new("test_disk.img");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+            .unwrap();
         drop(file);
 
         let result = ImgFileDisk::open(path);
@@ -458,14 +473,18 @@ mod tests {
         let path = Path::new("nonexistent.img");
         let result = ImgFileDisk::open(path);
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap(), Error::IO("Disk file not found".to_string()));
+        assert_eq!(
+            result.err().unwrap(),
+            Error::IO("Disk file not found".to_string())
+        );
     }
 
     #[test]
     fn img_file_disk_open_invalid_extension() {
         let path = Path::new("test_disk.txt");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+            .unwrap();
         drop(file);
 
         let result = ImgFileDisk::open(path);
@@ -499,7 +518,8 @@ mod tests {
     fn img_file_disk_write_block() {
         let path = Path::new("test_write.img");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+            .unwrap();
         drop(file);
 
         let mut disk = ImgFileDisk::open(path).unwrap();
@@ -521,7 +541,8 @@ mod tests {
     fn img_file_disk_block_size() {
         let path = Path::new("test_blocksize.img");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+            .unwrap();
         drop(file);
 
         let disk = ImgFileDisk::open(path).unwrap();
@@ -534,11 +555,148 @@ mod tests {
     fn img_file_disk_total_blocks() {
         let path = Path::new("test_total_blocks.img");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize]).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+            .unwrap();
         drop(file);
 
         let disk = ImgFileDisk::open(path).unwrap();
         assert_eq!(disk.total_blocks(), TOTAL_BLOCKS);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_format_clears_all_blocks() {
+        use crate::MyFS;
+
+        let path = Path::new("test_format_clear.img");
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&vec![0xFF; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+            .unwrap();
+        drop(file);
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+
+        for block_index in 0..TOTAL_BLOCKS {
+            disk.read_block(block_index, &mut buffer).unwrap();
+        }
+        assert_eq!(buffer, vec![0xFFu8; BLOCK_SIZE as usize]);
+
+        MyFS::format(&mut disk).unwrap();
+
+        for block_index in 0..TOTAL_BLOCKS {
+            disk.read_block(block_index, &mut buffer).unwrap();
+        }
+        assert_eq!(buffer, vec![0u8; BLOCK_SIZE as usize]);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_format_writes_superblock() {
+        use crate::MyFS;
+
+        let path = Path::new("test_format_superblock.img");
+        fs::File::create(path).unwrap();
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        MyFS::format(&mut disk).unwrap();
+
+        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        disk.read_block(0, &mut buffer).unwrap();
+
+        let superblock = Superblock::try_from_bytes(&buffer).unwrap();
+        assert_eq!(superblock.magic_number, MAGIC_NUMBER);
+        assert_eq!(superblock.version, 1);
+        assert_eq!(superblock.block_size, BLOCK_SIZE);
+        assert_eq!(superblock.total_blocks, TOTAL_BLOCKS);
+        assert_eq!(superblock.inode_count, INODE_COUNT);
+        assert_eq!(superblock.inode_size, INODE_SIZE);
+        assert_eq!(superblock.inode_bitmap_start, 1);
+        assert_eq!(superblock.data_bitmap_start, 2);
+        assert_eq!(superblock.inode_table_start, 3);
+        assert_eq!(superblock.data_block_start, 4);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_format_writes_inode_bitmap() {
+        use crate::MyFS;
+
+        let path = Path::new("test_format_inode_bitmap.img");
+        fs::File::create(path).unwrap();
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        MyFS::format(&mut disk).unwrap();
+
+        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        disk.read_block(1, &mut buffer).unwrap();
+
+        let inode_bitmap = Bitmap(buffer);
+        assert!(inode_bitmap.is_bit_set(0));
+        assert!(!inode_bitmap.is_bit_set(1));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_format_writes_data_bitmap() {
+        use crate::MyFS;
+
+        let path = Path::new("test_format_data_bitmap.img");
+        fs::File::create(path).unwrap();
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        MyFS::format(&mut disk).unwrap();
+
+        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        disk.read_block(2, &mut buffer).unwrap();
+
+        let data_bitmap = Bitmap(buffer);
+        assert!(data_bitmap.is_bit_set(0));
+        assert!(data_bitmap.is_bit_set(1));
+        assert!(data_bitmap.is_bit_set(2));
+        assert!(data_bitmap.is_bit_set(3));
+        assert!(data_bitmap.is_bit_set(4));
+        assert!(!data_bitmap.is_bit_set(5));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_format_writes_root_inode() {
+        use crate::{MyFS, Inode, InodeKind};
+
+        let path = Path::new("test_format_root_inode.img");
+        fs::File::create(path).unwrap();
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        MyFS::format(&mut disk).unwrap();
+
+        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        disk.read_block(3, &mut buffer).unwrap();
+
+        let root_inode = Inode::try_from_bytes(&buffer[0..INODE_SIZE as usize]).unwrap();
+        assert_eq!(root_inode.kind, InodeKind::Directory);
+        assert_eq!(root_inode.size, 0);
+        assert_eq!(root_inode.direct_block, 4);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_format_succeeds() {
+        use crate::MyFS;
+
+        let path = Path::new("test_format_success.img");
+        fs::File::create(path).unwrap();
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        let result = MyFS::format(&mut disk);
+
+        assert!(result.is_ok());
 
         fs::remove_file(path).unwrap();
     }
