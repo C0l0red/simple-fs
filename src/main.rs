@@ -13,8 +13,10 @@ fn main() {
 const MAGIC_NUMBER: u32 = 0x4D594653; // "MYFS" in ASCII
 const INODE_COUNT: u32 = 8;
 const INODE_SIZE: u32 = 9;
-const BLOCK_SIZE: u32 = 512;
+const BLOCK_SIZE: u32 = 4096;
 const TOTAL_BLOCKS: u32 = 16;
+const FILE_NAME_SIZE: usize = 250;
+const DIRECTORY_ENTRY_SIZE: usize = 256;
 
 #[derive(Debug, PartialEq)]
 enum Error {
@@ -65,23 +67,26 @@ struct Bitmap(Vec<u8>);
 
 #[derive(Copy, Clone)]
 struct Inode {
-    kind: InodeKind,
+    file_type: FileType,
     size: u32,
     direct_block: u32,
 }
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum InodeKind {
+enum FileType {
     File = 0u8,
     Directory = 1u8,
 }
 
 struct DirectoryEntry {
-    inode: u32,
-    name_len: u8,
-    name: [u8; 256],
+    inode_number: u32,
+    file_type: FileType,
+    name_length: u8,
+    name: [u8; FILE_NAME_SIZE],
 }
+
+struct Directory(Vec<DirectoryEntry>);
 
 impl Deref for Bitmap {
     type Target = [u8];
@@ -137,7 +142,7 @@ impl Bitmap {
     }
 }
 
-impl TryFrom<u8> for InodeKind {
+impl TryFrom<u8> for FileType {
     type Error = Error;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
@@ -150,12 +155,19 @@ impl TryFrom<u8> for InodeKind {
 }
 
 impl Inode {
-    fn new(kind: InodeKind, size: u32, direct_block: u32) -> Self {
+    fn new(file_type: FileType, size: u32, direct_block: u32) -> Self {
         Self {
-            kind,
+            file_type,
             size,
             direct_block,
         }
+    }
+}
+
+impl Deref for Directory {
+    type Target = Vec<DirectoryEntry>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -174,13 +186,13 @@ trait BytesSerializable {
 
 impl BytesSerializable for Inode {
     fn to_bytes(&self) -> Vec<u8> {
-        let mut buffer: Vec<u8> = vec![0u8; INODE_SIZE as usize];
+        let mut bytes: Vec<u8> = vec![0u8; INODE_SIZE as usize];
 
-        buffer[0] = self.kind as u8;
-        buffer[1..5].copy_from_slice(&self.size.to_le_bytes());
-        buffer[5..9].copy_from_slice(&self.direct_block.to_le_bytes());
+        bytes[0] = self.file_type as u8;
+        bytes[1..5].copy_from_slice(&self.size.to_le_bytes());
+        bytes[5..9].copy_from_slice(&self.direct_block.to_le_bytes());
 
-        buffer
+        bytes
     }
 
     fn try_from_bytes(buffer: &[u8]) -> Result<Self, Error> {
@@ -191,7 +203,7 @@ impl BytesSerializable for Inode {
         }
 
         Ok(Inode {
-            kind: InodeKind::try_from(buffer[0])?,
+            file_type: FileType::try_from(buffer[0])?,
             size: Self::bytes_to_u32(&buffer[1..5])?,
             direct_block: Self::bytes_to_u32(&buffer[5..9])?,
         })
@@ -200,41 +212,118 @@ impl BytesSerializable for Inode {
 
 impl BytesSerializable for Superblock {
     fn to_bytes(&self) -> Vec<u8> {
-        let mut buffer: Vec<u8> = vec![0u8; BLOCK_SIZE as usize];
+        let mut bytes: Vec<u8> = vec![0u8; BLOCK_SIZE as usize];
 
-        buffer[0..4].copy_from_slice(&self.magic_number.to_le_bytes());
-        buffer[4..8].copy_from_slice(&self.version.to_le_bytes());
-        buffer[8..12].copy_from_slice(&self.block_size.to_le_bytes());
-        buffer[12..16].copy_from_slice(&self.total_blocks.to_le_bytes());
-        buffer[16..20].copy_from_slice(&self.inode_count.to_le_bytes());
-        buffer[20..24].copy_from_slice(&self.inode_size.to_le_bytes());
-        buffer[24..28].copy_from_slice(&self.inode_bitmap_start.to_le_bytes());
-        buffer[28..32].copy_from_slice(&self.block_bitmap_start.to_le_bytes());
-        buffer[32..36].copy_from_slice(&self.inode_table_start.to_le_bytes());
-        buffer[36..40].copy_from_slice(&self.data_block_start.to_le_bytes());
+        bytes[0..4].copy_from_slice(&self.magic_number.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.version.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.block_size.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.total_blocks.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.inode_count.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.inode_size.to_le_bytes());
+        bytes[24..28].copy_from_slice(&self.inode_bitmap_start.to_le_bytes());
+        bytes[28..32].copy_from_slice(&self.block_bitmap_start.to_le_bytes());
+        bytes[32..36].copy_from_slice(&self.inode_table_start.to_le_bytes());
+        bytes[36..40].copy_from_slice(&self.data_block_start.to_le_bytes());
 
-        buffer
+        bytes
     }
 
-    fn try_from_bytes(buffer: &[u8]) -> Result<Self, Error> {
-        if buffer.len() < BLOCK_SIZE as usize {
+    fn try_from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() < BLOCK_SIZE as usize {
             return Err(Error::Validation(
                 "Buffer is too short to contain a Superblock".to_string(),
             ));
         }
 
         Ok(Superblock {
-            magic_number: Self::bytes_to_u32(&buffer[0..4])?,
-            version: Self::bytes_to_u32(&buffer[4..8])?,
-            block_size: Self::bytes_to_u32(&buffer[8..12])?,
-            total_blocks: Self::bytes_to_u32(&buffer[12..16])?,
-            inode_count: Self::bytes_to_u32(&buffer[16..20])?,
-            inode_size: Self::bytes_to_u32(&buffer[20..24])?,
-            inode_bitmap_start: Self::bytes_to_u32(&buffer[24..28])?,
-            block_bitmap_start: Self::bytes_to_u32(&buffer[28..32])?,
-            inode_table_start: Self::bytes_to_u32(&buffer[32..36])?,
-            data_block_start: Self::bytes_to_u32(&buffer[36..40])?,
+            magic_number: Self::bytes_to_u32(&bytes[0..4])?,
+            version: Self::bytes_to_u32(&bytes[4..8])?,
+            block_size: Self::bytes_to_u32(&bytes[8..12])?,
+            total_blocks: Self::bytes_to_u32(&bytes[12..16])?,
+            inode_count: Self::bytes_to_u32(&bytes[16..20])?,
+            inode_size: Self::bytes_to_u32(&bytes[20..24])?,
+            inode_bitmap_start: Self::bytes_to_u32(&bytes[24..28])?,
+            block_bitmap_start: Self::bytes_to_u32(&bytes[28..32])?,
+            inode_table_start: Self::bytes_to_u32(&bytes[32..36])?,
+            data_block_start: Self::bytes_to_u32(&bytes[36..40])?,
         })
+    }
+}
+
+impl BytesSerializable for DirectoryEntry {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes: Vec<u8> = vec![0u8; DIRECTORY_ENTRY_SIZE];
+
+        bytes[0..4].copy_from_slice(&self.inode_number.to_le_bytes());
+        bytes[4] = self.file_type as u8;
+        bytes[5] = self.name_length;
+        bytes[6..DIRECTORY_ENTRY_SIZE].copy_from_slice(&self.name);
+
+        bytes
+    }
+
+    fn try_from_bytes(bytes: &[u8]) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        if bytes.len() < DIRECTORY_ENTRY_SIZE {
+            return Err(Error::Validation(
+                "Byte array is too short to contain a DirectoryEntry".to_string(),
+            ));
+        }
+
+        let name: [u8; FILE_NAME_SIZE] = bytes[6..DIRECTORY_ENTRY_SIZE]
+            .try_into()
+            .map_err(|_| Error::Validation("Invalid name length".into()))?;
+
+        Ok(Self {
+            inode_number: Self::bytes_to_u32(&bytes[0..4])?,
+            file_type: FileType::try_from(bytes[4])?,
+            name_length: bytes[5],
+            name,
+        })
+    }
+}
+
+// This is a repetition of serializing and deserializing directory entry in a vector,
+// But it is necessary for speed to avoid creating bytes on the heap repeatedly when transforming a
+// directory to bytes
+impl BytesSerializable for Directory {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer = vec![0u8; DIRECTORY_ENTRY_SIZE * self.len()];
+        for (i, entry) in self.iter().enumerate() {
+            let start_index = i * DIRECTORY_ENTRY_SIZE;
+            buffer[start_index..start_index + 4].copy_from_slice(&entry.inode_number.to_le_bytes());
+            buffer[start_index + 4] = entry.file_type as u8;
+            buffer[start_index + 5] = entry.name_length;
+            buffer[start_index + 6..start_index + 6 + FILE_NAME_SIZE].copy_from_slice(&entry.name);
+        }
+
+        buffer
+    }
+
+    fn try_from_bytes(bytes: &[u8]) -> Result<Self, Error>
+    where
+        Self: Sized
+    {
+        if bytes.len() % DIRECTORY_ENTRY_SIZE != 0 {
+            return Err(Error::Validation(
+                "Byte array is not a multiple of DIRECTORY_ENTRY_SIZE".to_string(),
+            ));
+        }
+
+        let mut cursor = 0;
+        let mut entries = Vec::with_capacity(bytes.len() / DIRECTORY_ENTRY_SIZE);
+
+        while cursor < bytes.len() {
+            let entry_bytes = &bytes[cursor..cursor + DIRECTORY_ENTRY_SIZE];
+            let entry = DirectoryEntry::try_from_bytes(entry_bytes)?;
+
+            cursor += DIRECTORY_ENTRY_SIZE;
+            entries.push(entry);
+        }
+
+        Ok(Directory(entries))
     }
 }
 
@@ -377,12 +466,22 @@ impl<D: BlockDevice> MyFS<D> {
         device.write_block(2, buffer.as_slice())?;
 
         // Write inode table
-        let root_directory_inode = Inode::new(InodeKind::Directory, 0, 4);
+        let root_directory_inode = Inode::new(FileType::Directory, 0, 4);
         buffer.fill(0u8);
         buffer[0..INODE_SIZE as usize].copy_from_slice(root_directory_inode.to_bytes().as_slice());
         device.write_block(3, buffer.as_slice())?;
 
         Ok(())
+    }
+
+    fn resolve_path(&mut self, path: &str) -> Result<Inode, Error> {
+        let path_components = path.split('/').collect::<Vec<&str>>();
+        let mut buffer = vec![0u8; self.superblock.block_size as usize];
+
+        // Read first data block (root directory block)
+        self.device
+            .read_block(self.superblock.data_block_start, &mut buffer)?;
+        todo!()
     }
 }
 
@@ -392,7 +491,7 @@ mod tests {
         BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, Error, INODE_COUNT, INODE_SIZE,
         ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS,
     };
-    use crate::{MyFS, Inode, InodeKind};
+    use crate::{FileType, Inode, MyFS};
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -402,7 +501,7 @@ mod tests {
         let superblock = Superblock {
             magic_number: MAGIC_NUMBER,
             version: 1,
-            block_size: 512,
+            block_size: BLOCK_SIZE,
             total_blocks: 16,
             inode_count: 8,
             inode_size: 9,
@@ -429,23 +528,43 @@ mod tests {
 
     #[test]
     fn deserialize_superblock_from_bytes() {
-        let mut buffer: Vec<u8> = vec![
-            83, 70, 89, 77, 1, 0, 0, 0, 0, 2, 0, 0, 16, 0, 0, 0, 8, 0, 0, 0, 9, 0, 0, 0, 1, 0, 0,
-            0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0,
-        ];
-        buffer.resize(BLOCK_SIZE as usize, 0u8);
-        let superblock = Superblock::try_from_bytes(&buffer).unwrap();
+        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let superblock = Superblock {
+            magic_number: MAGIC_NUMBER,
+            version: 1,
+            block_size: BLOCK_SIZE,
+            total_blocks: 16,
+            inode_count: 8,
+            inode_size: 9,
+            inode_bitmap_start: 1,
+            block_bitmap_start: 2,
+            inode_table_start: 3,
+            data_block_start: 4,
+        };
 
-        assert_eq!(superblock.magic_number, MAGIC_NUMBER);
-        assert_eq!(superblock.version, 1);
-        assert_eq!(superblock.block_size, BLOCK_SIZE);
-        assert_eq!(superblock.total_blocks, TOTAL_BLOCKS);
-        assert_eq!(superblock.inode_count, INODE_COUNT);
-        assert_eq!(superblock.inode_size, INODE_SIZE);
-        assert_eq!(superblock.inode_bitmap_start, 1);
-        assert_eq!(superblock.block_bitmap_start, 2);
-        assert_eq!(superblock.inode_table_start, 3);
-        assert_eq!(superblock.data_block_start, 4);
+        buffer[0..4].copy_from_slice(&superblock.magic_number.to_le_bytes());
+        buffer[4..8].copy_from_slice(&superblock.version.to_le_bytes());
+        buffer[8..12].copy_from_slice(&superblock.block_size.to_le_bytes());
+        buffer[12..16].copy_from_slice(&superblock.total_blocks.to_le_bytes());
+        buffer[16..20].copy_from_slice(&superblock.inode_count.to_le_bytes());
+        buffer[20..24].copy_from_slice(&superblock.inode_size.to_le_bytes());
+        buffer[24..28].copy_from_slice(&superblock.inode_bitmap_start.to_le_bytes());
+        buffer[28..32].copy_from_slice(&superblock.block_bitmap_start.to_le_bytes());
+        buffer[32..36].copy_from_slice(&superblock.inode_table_start.to_le_bytes());
+        buffer[36..40].copy_from_slice(&superblock.data_block_start.to_le_bytes());
+
+        let superblock_from_buffer = Superblock::try_from_bytes(&buffer).unwrap();
+
+        assert_eq!(superblock_from_buffer.magic_number, superblock.magic_number);
+        assert_eq!(superblock_from_buffer.version, superblock.version);
+        assert_eq!(superblock_from_buffer.block_size, superblock.block_size);
+        assert_eq!(superblock_from_buffer.total_blocks, superblock.total_blocks);
+        assert_eq!(superblock_from_buffer.inode_count, superblock.inode_count);
+        assert_eq!(superblock_from_buffer.inode_size, superblock.inode_size);
+        assert_eq!(superblock_from_buffer.inode_bitmap_start, superblock.inode_bitmap_start);
+        assert_eq!(superblock_from_buffer.block_bitmap_start, superblock.block_bitmap_start);
+        assert_eq!(superblock_from_buffer.inode_table_start, superblock.inode_table_start);
+        assert_eq!(superblock_from_buffer.data_block_start, superblock.data_block_start);
     }
 
     #[test]
@@ -469,7 +588,7 @@ mod tests {
     #[test]
     fn img_file_disk_open_file_not_found() {
         let path = Path::new("nonexistent.img");
-        
+
         let result = ImgFileDisk::open(path);
 
         assert!(result.is_err());
@@ -483,14 +602,12 @@ mod tests {
     fn img_file_disk_open_invalid_extension() {
         let path = Path::new("test_disk.txt");
         fs::File::create(path).unwrap();
-        
+
         let result = ImgFileDisk::open(path);
         assert!(result.is_err());
 
         fs::remove_file(path).unwrap();
     }
-    
-    
 
     #[test]
     fn img_file_disk_read_block() {
@@ -525,7 +642,10 @@ mod tests {
         let result = disk.read_block(0, &mut buffer);
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap(), Error::Validation("Buffer is too small to contain a block".to_string()));
+        assert_eq!(
+            result.err().unwrap(),
+            Error::Validation("Buffer is too small to contain a block".to_string())
+        );
 
         fs::remove_file(path).unwrap();
     }
@@ -566,7 +686,10 @@ mod tests {
         let result = disk.write_block(0, &buffer);
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap(), Error::Validation("Buffer is too small to contain a block".to_string()));
+        assert_eq!(
+            result.err().unwrap(),
+            Error::Validation("Buffer is too small to contain a block".to_string())
+        );
 
         fs::remove_file(path).unwrap();
     }
@@ -707,7 +830,7 @@ mod tests {
         disk.read_block(3, &mut buffer).unwrap();
 
         let root_inode = Inode::try_from_bytes(&buffer[0..INODE_SIZE as usize]).unwrap();
-        assert_eq!(root_inode.kind, InodeKind::Directory);
+        assert_eq!(root_inode.file_type, FileType::Directory);
         assert_eq!(root_inode.size, 0);
         assert_eq!(root_inode.direct_block, 4);
 
