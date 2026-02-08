@@ -266,6 +266,11 @@ impl ImgFileDisk {
 
 impl BlockDevice for ImgFileDisk {
     fn read_block(&mut self, block_index: u32, buffer: &mut [u8]) -> Result<(), Error> {
+        if buffer.len() < self.block_size as usize {
+            return Err(Error::Validation(
+                "Buffer is too small to contain a block".to_string(),
+            ));
+        }
         self.file
             .seek(SeekFrom::Start((block_index * self.block_size) as u64))
             .map_err(|_| {
@@ -279,6 +284,11 @@ impl BlockDevice for ImgFileDisk {
     }
 
     fn write_block(&mut self, block_index: u32, buffer: &[u8]) -> Result<(), Error> {
+        if buffer.len() < self.block_size as usize {
+            return Err(Error::Validation(
+                "Buffer is too small to contain a block".to_string(),
+            ));
+        }
         self.file
             .seek(SeekFrom::Start((block_index * self.block_size) as u64))
             .map_err(|_| Error::IO("Could not seek while writing block to img file".to_string()))?;
@@ -392,6 +402,7 @@ mod tests {
         BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, Error, INODE_COUNT, INODE_SIZE,
         ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS,
     };
+    use crate::{MyFS, Inode, InodeKind};
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -457,10 +468,7 @@ mod tests {
     #[test]
     fn img_file_disk_open_valid_file() {
         let path = Path::new("test_disk.img");
-        let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
-            .unwrap();
-        drop(file);
+        fs::File::create(path).unwrap();
 
         let result = ImgFileDisk::open(path);
         assert!(result.is_ok());
@@ -471,7 +479,9 @@ mod tests {
     #[test]
     fn img_file_disk_open_file_not_found() {
         let path = Path::new("nonexistent.img");
+        
         let result = ImgFileDisk::open(path);
+
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
@@ -482,16 +492,15 @@ mod tests {
     #[test]
     fn img_file_disk_open_invalid_extension() {
         let path = Path::new("test_disk.txt");
-        let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
-            .unwrap();
-        drop(file);
-
+        fs::File::create(path).unwrap();
+        
         let result = ImgFileDisk::open(path);
         assert!(result.is_err());
 
         fs::remove_file(path).unwrap();
     }
+    
+    
 
     #[test]
     fn img_file_disk_read_block() {
@@ -501,7 +510,6 @@ mod tests {
         data[BLOCK_SIZE as usize] = 0xAB;
         data[BLOCK_SIZE as usize + 1] = 0xCD;
         file.write_all(&data).unwrap();
-        drop(file);
 
         let mut disk = ImgFileDisk::open(path).unwrap();
         let mut buffer = vec![0u8; BLOCK_SIZE as usize];
@@ -510,6 +518,24 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(buffer[0], 0xAB);
         assert_eq!(buffer[1], 0xCD);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn img_file_disk_read_block_buffer_too_small() {
+        let path = Path::new("test_read_small_buffer.img");
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+            .unwrap();
+        drop(file);
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        let mut buffer = vec![0u8; (BLOCK_SIZE - 1) as usize];
+        let result = disk.read_block(0, &mut buffer);
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), Error::Validation("Buffer is too small to contain a block".to_string()));
 
         fs::remove_file(path).unwrap();
     }
@@ -533,6 +559,24 @@ mod tests {
         let mut read_buffer = vec![0u8; BLOCK_SIZE as usize];
         disk.read_block(2, &mut read_buffer).unwrap();
         assert_eq!(read_buffer[0..4], data[..]);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn img_file_disk_write_block_buffer_too_small() {
+        let path = Path::new("test_write_small_buffer.img");
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+            .unwrap();
+        drop(file);
+
+        let mut disk = ImgFileDisk::open(path).unwrap();
+        let buffer = vec![0u8; (BLOCK_SIZE - 1) as usize];
+        let result = disk.write_block(0, &buffer);
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), Error::Validation("Buffer is too small to contain a block".to_string()));
 
         fs::remove_file(path).unwrap();
     }
@@ -571,6 +615,7 @@ mod tests {
 
         let path = Path::new("test_format_clear.img");
         let mut file = fs::File::create(path).unwrap();
+        // Write data into all blocks in the file
         file.write_all(&vec![0xFF; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
             .unwrap();
         drop(file);
@@ -578,13 +623,16 @@ mod tests {
         let mut disk = ImgFileDisk::open(path).unwrap();
         let mut buffer = vec![0u8; BLOCK_SIZE as usize];
 
+        // Ensure the data exists in the file
         for block_index in 0..TOTAL_BLOCKS {
             disk.read_block(block_index, &mut buffer).unwrap();
         }
         assert_eq!(buffer, vec![0xFFu8; BLOCK_SIZE as usize]);
 
+        // Format the disk
         MyFS::format(&mut disk).unwrap();
 
+        // Ensure the data is cleared after formatting
         for block_index in 0..TOTAL_BLOCKS {
             disk.read_block(block_index, &mut buffer).unwrap();
         }
