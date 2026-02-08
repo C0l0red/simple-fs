@@ -56,7 +56,7 @@ struct Superblock {
     inode_count: u32,
     inode_size: u32,
     inode_bitmap_start: u32,
-    data_bitmap_start: u32,
+    block_bitmap_start: u32,
     inode_table_start: u32,
     data_block_start: u32,
 }
@@ -97,12 +97,12 @@ impl DerefMut for Bitmap {
 }
 
 impl Bitmap {
-    fn new() -> Self {
-        Self(vec![0u8; BLOCK_SIZE as usize])
+    fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
     }
 
     fn create_and_occupy_first_n_bits(occupied_offset: usize) -> Self {
-        let mut bitmap = Self::new();
+        let mut bitmap = Self::new(vec![0u8; BLOCK_SIZE as usize]);
         let full_bytes = occupied_offset / 8;
         let remaining_bits = occupied_offset % 8;
 
@@ -209,7 +209,7 @@ impl BytesSerializable for Superblock {
         buffer[16..20].copy_from_slice(&self.inode_count.to_le_bytes());
         buffer[20..24].copy_from_slice(&self.inode_size.to_le_bytes());
         buffer[24..28].copy_from_slice(&self.inode_bitmap_start.to_le_bytes());
-        buffer[28..32].copy_from_slice(&self.data_bitmap_start.to_le_bytes());
+        buffer[28..32].copy_from_slice(&self.block_bitmap_start.to_le_bytes());
         buffer[32..36].copy_from_slice(&self.inode_table_start.to_le_bytes());
         buffer[36..40].copy_from_slice(&self.data_block_start.to_le_bytes());
 
@@ -231,7 +231,7 @@ impl BytesSerializable for Superblock {
             inode_count: Self::bytes_to_u32(&buffer[16..20])?,
             inode_size: Self::bytes_to_u32(&buffer[20..24])?,
             inode_bitmap_start: Self::bytes_to_u32(&buffer[24..28])?,
-            data_bitmap_start: Self::bytes_to_u32(&buffer[28..32])?,
+            block_bitmap_start: Self::bytes_to_u32(&buffer[28..32])?,
             inode_table_start: Self::bytes_to_u32(&buffer[32..36])?,
             data_block_start: Self::bytes_to_u32(&buffer[36..40])?,
         })
@@ -310,11 +310,30 @@ impl BlockDevice for ImgFileDisk {
 
 impl<D: BlockDevice> MyFS<D> {
     fn mount(mut device: D) -> Result<Self, Error> {
-        // read superblock
-        // validate magic
-        // load bitmaps
-        // construct MyFS
-        todo!()
+        // Read superblock
+        let mut buffer = vec![0u8; device.block_size() as usize];
+        device.read_block(0, &mut buffer)?;
+        let superblock = Superblock::try_from_bytes(&buffer)?;
+
+        // Validate magic number
+        if superblock.magic_number != MAGIC_NUMBER {
+            return Err(Error::Validation(
+                "Disk is not a valid MyFS disk".to_string(),
+            ));
+        }
+
+        // Load bitmaps
+        device.read_block(superblock.inode_bitmap_start, &mut buffer)?;
+        let inode_bitmap = Bitmap::new(buffer.clone());
+        device.read_block(superblock.block_bitmap_start, &mut buffer)?;
+        let block_bitmap = Bitmap::new(buffer.clone());
+
+        Ok(MyFS {
+            device,
+            superblock,
+            inode_bitmap,
+            block_bitmap,
+        })
     }
 
     fn format(device: &mut D) -> Result<(), Error> {
@@ -338,7 +357,7 @@ impl<D: BlockDevice> MyFS<D> {
             inode_count: INODE_COUNT,
             inode_size: INODE_SIZE,
             inode_bitmap_start: 1,
-            data_bitmap_start: 2,
+            block_bitmap_start: 2,
             inode_table_start: 3,
             data_block_start: 4,
         };
@@ -367,35 +386,6 @@ impl<D: BlockDevice> MyFS<D> {
     }
 }
 
-// impl ImgFileDisk {
-//     fn validate_img_file(&self, block_size: u32, magic_number: u32) -> Result<(), Error> {
-//         let mut buffer = vec![0u8; block_size as usize];
-//         let mut file = File::open(&self.file)
-//             .map_err(|_| Error::Validation("Could not open disk file".to_string()))?;
-//
-//         let bytes_read = file
-//             .read(buffer.as_mut_slice())
-//             .map_err(|_| Error::Validation("Could not read disk file".to_string()))?;
-//         if bytes_read == 0 {
-//             return Self::format_disk(file, block_size, magic_number);
-//         }
-//         if bytes_read != block_size as usize {
-//             return Err(Error::Validation("File is too small".to_string()));
-//         }
-//
-//         let super_block = Superblock::try_from_bytes(&buffer)
-//             .map_err(|_| Error::Validation("Could not read superblock".to_string()))?;
-//
-//         if super_block.magic_number != magic_number {
-//             return Err(Error::Validation(
-//                 "File is not a valid Disk for this file system".to_string(),
-//             ));
-//         }
-//
-//         Ok(())
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -417,7 +407,7 @@ mod tests {
             inode_count: 8,
             inode_size: 9,
             inode_bitmap_start: 1,
-            data_bitmap_start: 2,
+            block_bitmap_start: 2,
             inode_table_start: 3,
             data_block_start: 4,
         };
@@ -432,7 +422,7 @@ mod tests {
         assert_eq!(buffer[16..20], superblock.inode_count.to_le_bytes());
         assert_eq!(buffer[20..24], superblock.inode_size.to_le_bytes());
         assert_eq!(buffer[24..28], superblock.inode_bitmap_start.to_le_bytes());
-        assert_eq!(buffer[28..32], superblock.data_bitmap_start.to_le_bytes());
+        assert_eq!(buffer[28..32], superblock.block_bitmap_start.to_le_bytes());
         assert_eq!(buffer[32..36], superblock.inode_table_start.to_le_bytes());
         assert_eq!(buffer[36..40], superblock.data_block_start.to_le_bytes());
     }
@@ -453,7 +443,7 @@ mod tests {
         assert_eq!(superblock.inode_count, INODE_COUNT);
         assert_eq!(superblock.inode_size, INODE_SIZE);
         assert_eq!(superblock.inode_bitmap_start, 1);
-        assert_eq!(superblock.data_bitmap_start, 2);
+        assert_eq!(superblock.block_bitmap_start, 2);
         assert_eq!(superblock.inode_table_start, 3);
         assert_eq!(superblock.data_block_start, 4);
     }
@@ -662,7 +652,7 @@ mod tests {
         assert_eq!(superblock.inode_count, INODE_COUNT);
         assert_eq!(superblock.inode_size, INODE_SIZE);
         assert_eq!(superblock.inode_bitmap_start, 1);
-        assert_eq!(superblock.data_bitmap_start, 2);
+        assert_eq!(superblock.block_bitmap_start, 2);
         assert_eq!(superblock.inode_table_start, 3);
         assert_eq!(superblock.data_block_start, 4);
 
