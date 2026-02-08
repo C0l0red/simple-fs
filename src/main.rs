@@ -487,10 +487,7 @@ impl<D: BlockDevice> MyFS<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, Error, INODE_COUNT, INODE_SIZE,
-        ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS,
-    };
+    use crate::{BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, Error, INODE_COUNT, INODE_SIZE, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, FILE_NAME_SIZE, DIRECTORY_ENTRY_SIZE, DirectoryEntry, Directory};
     use crate::{FileType, Inode, MyFS};
     use std::fs;
     use std::io::Write;
@@ -572,6 +569,113 @@ mod tests {
         let bitmap = Bitmap::create_and_occupy_first_n_bits(4);
         assert_eq!(bitmap[0], 0b1111);
         assert_eq!(bitmap[1], 0b0000);
+    }
+
+    #[test]
+    fn serialize_directory_entry_to_bytes() {
+        let mut name = [0u8; FILE_NAME_SIZE];
+        name[0..8].copy_from_slice(b"test.txt");
+
+        let entry = DirectoryEntry {
+            inode_number: 42,
+            file_type: FileType::File,
+            name_length: 8,
+            name,
+        };
+
+        let bytes = entry.to_bytes();
+
+        assert_eq!(bytes.len(), DIRECTORY_ENTRY_SIZE);
+        assert_eq!(&bytes[0..4], &42u32.to_le_bytes());
+        assert_eq!(bytes[4], FileType::File as u8);
+        assert_eq!(bytes[5], 8);
+        assert_eq!(&bytes[6..14], b"test.txt");
+    }
+
+    #[test]
+    fn deserialize_directory_entry_from_bytes() {
+        let mut bytes = vec![0u8; DIRECTORY_ENTRY_SIZE];
+        bytes[0..4].copy_from_slice(&123u32.to_le_bytes());
+        bytes[4] = FileType::Directory as u8;
+        bytes[5] = 12;
+        bytes[6..18].copy_from_slice(b"applications");
+
+        let entry = DirectoryEntry::try_from_bytes(&bytes).unwrap();
+
+        assert_eq!(entry.inode_number, 123);
+        assert_eq!(entry.file_type, FileType::Directory);
+        assert_eq!(entry.name_length, 12);
+        assert_eq!(&entry.name[0..12], b"applications");
+    }
+
+    #[test]
+    fn serialize_directory_to_bytes() {
+        let mut name1 = [0u8; FILE_NAME_SIZE];
+        name1[0..8].copy_from_slice(b"file.txt");
+        let entry1 = DirectoryEntry {
+            inode_number: 1,
+            file_type: FileType::File,
+            name_length: 8,
+            name: name1,
+        };
+
+        let mut name2 = [0u8; FILE_NAME_SIZE];
+        name2[0..3].copy_from_slice(b"dir");
+        let entry2 = DirectoryEntry {
+            inode_number: 2,
+            file_type: FileType::Directory,
+            name_length: 3,
+            name: name2,
+        };
+
+        let directory = Directory(vec![entry1, entry2]);
+        let bytes = directory.to_bytes();
+
+        assert_eq!(bytes.len(), DIRECTORY_ENTRY_SIZE * 2);
+
+        // Check first entry
+        assert_eq!(&bytes[0..4], &1u32.to_le_bytes());
+        assert_eq!(bytes[4], FileType::File as u8);
+        assert_eq!(bytes[5], 8);
+        assert_eq!(&bytes[6..14], b"file.txt");
+
+        // Check second entry
+        let offset = DIRECTORY_ENTRY_SIZE;
+        assert_eq!(&bytes[offset..offset + 4], &2u32.to_le_bytes());
+        assert_eq!(bytes[offset + 4], FileType::Directory as u8);
+        assert_eq!(bytes[offset + 5], 3);
+        assert_eq!(&bytes[offset + 6..offset + 9], b"dir");
+    }
+
+    #[test]
+    fn deserialize_directory_from_bytes() {
+        let mut bytes = vec![0u8; DIRECTORY_ENTRY_SIZE * 2];
+
+        // First entry
+        bytes[0..4].copy_from_slice(&10u32.to_le_bytes());
+        bytes[4] = FileType::File as u8;
+        bytes[5] = 9;
+        bytes[6..15].copy_from_slice(b"test1.txt");
+
+        // Second entry
+        let offset = DIRECTORY_ENTRY_SIZE;
+        bytes[offset..offset + 4].copy_from_slice(&20u32.to_le_bytes());
+        bytes[offset + 4] = FileType::Directory as u8;
+        bytes[offset + 5] = 9;
+        bytes[offset + 6..offset + 15].copy_from_slice(b"test2.txt");
+
+        let directory = Directory::try_from_bytes(&bytes).unwrap();
+
+        assert_eq!(directory.len(), 2);
+        assert_eq!(directory[0].inode_number, 10);
+        assert_eq!(directory[0].file_type, FileType::File);
+        assert_eq!(directory[0].name_length, 9);
+        assert_eq!(&directory[0].name[0..9], b"test1.txt");
+
+        assert_eq!(directory[1].inode_number, 20);
+        assert_eq!(directory[1].file_type, FileType::Directory);
+        assert_eq!(directory[1].name_length, 9);
+        assert_eq!(&directory[1].name[0..9], b"test2.txt");
     }
 
     #[test]
