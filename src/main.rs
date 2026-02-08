@@ -601,8 +601,6 @@ mod tests {
 
     #[test]
     fn myfs_format_clears_all_blocks() {
-        use crate::MyFS;
-
         let path = Path::new("test_format_clear.img");
         let mut file = fs::File::create(path).unwrap();
         // Write data into all blocks in the file
@@ -633,8 +631,6 @@ mod tests {
 
     #[test]
     fn myfs_format_writes_superblock() {
-        use crate::MyFS;
-
         let path = Path::new("test_format_superblock.img");
         fs::File::create(path).unwrap();
 
@@ -661,8 +657,6 @@ mod tests {
 
     #[test]
     fn myfs_format_writes_inode_bitmap() {
-        use crate::MyFS;
-
         let path = Path::new("test_format_inode_bitmap.img");
         fs::File::create(path).unwrap();
 
@@ -681,8 +675,6 @@ mod tests {
 
     #[test]
     fn myfs_format_writes_data_bitmap() {
-        use crate::MyFS;
-
         let path = Path::new("test_format_data_bitmap.img");
         fs::File::create(path).unwrap();
 
@@ -705,8 +697,6 @@ mod tests {
 
     #[test]
     fn myfs_format_writes_root_inode() {
-        use crate::{MyFS, Inode, InodeKind};
-
         let path = Path::new("test_format_root_inode.img");
         fs::File::create(path).unwrap();
 
@@ -726,14 +716,165 @@ mod tests {
 
     #[test]
     fn myfs_format_succeeds() {
-        use crate::MyFS;
-
         let path = Path::new("test_format_success.img");
         fs::File::create(path).unwrap();
 
         let mut disk = ImgFileDisk::open(path).unwrap();
         let result = MyFS::format(&mut disk);
 
+        assert!(result.is_ok());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_mount_invalid_magic_number() {
+        let path = Path::new("test_mount_invalid_magic.img");
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+            .unwrap();
+        drop(file);
+
+        let disk = ImgFileDisk::open(path).unwrap();
+        let result = MyFS::mount(disk);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap(),
+            Error::Validation("Disk is not a valid MyFS disk".to_string())
+        );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_mount_reads_superblock_correctly() {
+        let path = Path::new("test_mount_superblock.img");
+        let mut file = fs::File::create(path).unwrap();
+
+        // Write superblock manually
+        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
+        data[0..4].copy_from_slice(&MAGIC_NUMBER.to_le_bytes());
+        data[4..8].copy_from_slice(&1u32.to_le_bytes()); // version
+        data[8..12].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
+        data[12..16].copy_from_slice(&TOTAL_BLOCKS.to_le_bytes());
+        data[16..20].copy_from_slice(&INODE_COUNT.to_le_bytes());
+        data[20..24].copy_from_slice(&INODE_SIZE.to_le_bytes());
+        data[24..28].copy_from_slice(&1u32.to_le_bytes()); // inode_bitmap_start
+        data[28..32].copy_from_slice(&2u32.to_le_bytes()); // block_bitmap_start
+        data[32..36].copy_from_slice(&3u32.to_le_bytes()); // inode_table_start
+        data[36..40].copy_from_slice(&4u32.to_le_bytes()); // data_block_start
+
+        file.write_all(&data).unwrap();
+        drop(file);
+
+        let disk = ImgFileDisk::open(path).unwrap();
+        let fs = MyFS::mount(disk).unwrap();
+        assert_eq!(fs.superblock.magic_number, MAGIC_NUMBER);
+        assert_eq!(fs.superblock.version, 1);
+        assert_eq!(fs.superblock.block_size, BLOCK_SIZE);
+        assert_eq!(fs.superblock.total_blocks, TOTAL_BLOCKS);
+        assert_eq!(fs.superblock.inode_count, INODE_COUNT);
+        assert_eq!(fs.superblock.inode_size, INODE_SIZE);
+        assert_eq!(fs.superblock.inode_bitmap_start, 1);
+        assert_eq!(fs.superblock.block_bitmap_start, 2);
+        assert_eq!(fs.superblock.inode_table_start, 3);
+        assert_eq!(fs.superblock.data_block_start, 4);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_mount_loads_inode_bitmap() {
+        let path = Path::new("test_mount_inode_bitmap.img");
+        let mut file = fs::File::create(path).unwrap();
+
+        // Write superblock and inode bitmap manually
+        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
+        data[0..4].copy_from_slice(&MAGIC_NUMBER.to_le_bytes());
+        data[4..8].copy_from_slice(&1u32.to_le_bytes());
+        data[8..12].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
+        data[12..16].copy_from_slice(&TOTAL_BLOCKS.to_le_bytes());
+        data[16..20].copy_from_slice(&INODE_COUNT.to_le_bytes());
+        data[20..24].copy_from_slice(&INODE_SIZE.to_le_bytes());
+        data[24..28].copy_from_slice(&1u32.to_le_bytes());
+        data[28..32].copy_from_slice(&2u32.to_le_bytes());
+        data[32..36].copy_from_slice(&3u32.to_le_bytes());
+        data[36..40].copy_from_slice(&4u32.to_le_bytes());
+
+        // Write inode bitmap at block 1 with first bit set
+        data[BLOCK_SIZE as usize] = 0b00000001;
+
+        file.write_all(&data).unwrap();
+        drop(file);
+
+        let disk = ImgFileDisk::open(path).unwrap();
+        let fs = MyFS::mount(disk).unwrap();
+        assert!(fs.inode_bitmap.is_bit_set(0));
+        assert!(!fs.inode_bitmap.is_bit_set(1));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_mount_loads_block_bitmap() {
+        let path = Path::new("test_mount_block_bitmap.img");
+        let mut file = fs::File::create(path).unwrap();
+
+        // Write superblock and block bitmap manually
+        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
+        data[0..4].copy_from_slice(&MAGIC_NUMBER.to_le_bytes());
+        data[4..8].copy_from_slice(&1u32.to_le_bytes());
+        data[8..12].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
+        data[12..16].copy_from_slice(&TOTAL_BLOCKS.to_le_bytes());
+        data[16..20].copy_from_slice(&INODE_COUNT.to_le_bytes());
+        data[20..24].copy_from_slice(&INODE_SIZE.to_le_bytes());
+        data[24..28].copy_from_slice(&1u32.to_le_bytes());
+        data[28..32].copy_from_slice(&2u32.to_le_bytes());
+        data[32..36].copy_from_slice(&3u32.to_le_bytes());
+        data[36..40].copy_from_slice(&4u32.to_le_bytes());
+
+        // Write block bitmap at block 2 with first 5 bits set
+        data[(2 * BLOCK_SIZE) as usize] = 0b00011111;
+
+        file.write_all(&data).unwrap();
+        drop(file);
+
+        let disk = ImgFileDisk::open(path).unwrap();
+        let fs = MyFS::mount(disk).unwrap();
+        assert!(fs.block_bitmap.is_bit_set(0));
+        assert!(fs.block_bitmap.is_bit_set(1));
+        assert!(fs.block_bitmap.is_bit_set(2));
+        assert!(fs.block_bitmap.is_bit_set(3));
+        assert!(fs.block_bitmap.is_bit_set(4));
+        assert!(!fs.block_bitmap.is_bit_set(5));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn myfs_mount_succeeds() {
+        let path = Path::new("test_mount_success.img");
+        let mut file = fs::File::create(path).unwrap();
+
+        // Write superblock manually
+        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
+        data[0..4].copy_from_slice(&MAGIC_NUMBER.to_le_bytes());
+        data[4..8].copy_from_slice(&1u32.to_le_bytes()); // version
+        data[8..12].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
+        data[12..16].copy_from_slice(&TOTAL_BLOCKS.to_le_bytes());
+        data[16..20].copy_from_slice(&INODE_COUNT.to_le_bytes());
+        data[20..24].copy_from_slice(&INODE_SIZE.to_le_bytes());
+        data[24..28].copy_from_slice(&1u32.to_le_bytes()); // inode_bitmap_start
+        data[28..32].copy_from_slice(&2u32.to_le_bytes()); // block_bitmap_start
+        data[32..36].copy_from_slice(&3u32.to_le_bytes()); // inode_table_start
+        data[36..40].copy_from_slice(&4u32.to_le_bytes()); // data_block_start
+
+        file.write_all(&data).unwrap();
+        drop(file);
+
+        let disk = ImgFileDisk::open(path).unwrap();
+        let result = MyFS::mount(disk);
         assert!(result.is_ok());
 
         fs::remove_file(path).unwrap();
