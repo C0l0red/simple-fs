@@ -48,6 +48,7 @@ struct MyFS<D: BlockDevice> {
     superblock: Superblock,
     inode_bitmap: Bitmap,
     block_bitmap: Bitmap,
+    inodes: Vec<Inode>,
 }
 
 struct Superblock {
@@ -196,7 +197,7 @@ impl BytesSerializable for Inode {
     }
 
     fn try_from_bytes(buffer: &[u8]) -> Result<Self, Error> {
-        if buffer.len() < 9 {
+        if buffer.len() < INODE_SIZE as usize {
             return Err(Error::Validation(
                 "Buffer is too short to contain an Inode".to_string(),
             ));
@@ -304,7 +305,7 @@ impl BytesSerializable for Directory {
 
     fn try_from_bytes(bytes: &[u8]) -> Result<Self, Error>
     where
-        Self: Sized
+        Self: Sized,
     {
         if bytes.len() % DIRECTORY_ENTRY_SIZE != 0 {
             return Err(Error::Validation(
@@ -414,14 +415,23 @@ impl<D: BlockDevice> MyFS<D> {
         // Load bitmaps
         device.read_block(superblock.inode_bitmap_start, &mut buffer)?;
         let inode_bitmap = Bitmap::new(buffer.clone());
+
         device.read_block(superblock.block_bitmap_start, &mut buffer)?;
         let block_bitmap = Bitmap::new(buffer.clone());
+
+        device.read_block(superblock.inode_table_start, &mut buffer)?;
+        let inodes = buffer
+            .chunks(superblock.inode_size as usize)
+            .take(superblock.inode_count as usize)
+            .map(|chunk| Inode::try_from_bytes(chunk))
+            .collect::<Result<_, _>>()?;
 
         Ok(MyFS {
             device,
             superblock,
             inode_bitmap,
             block_bitmap,
+            inodes,
         })
     }
 
@@ -474,20 +484,56 @@ impl<D: BlockDevice> MyFS<D> {
         Ok(())
     }
 
-    fn resolve_path(&mut self, path: &str) -> Result<Inode, Error> {
-        let path_components = path.split('/').collect::<Vec<&str>>();
+    fn resolve_path(&mut self, path: &str) -> Result<u32, Error> {
+        let path_components = path
+            .split('/')
+            .filter(|&c| !c.is_empty())
+            .collect::<Vec<&str>>();
         let mut buffer = vec![0u8; self.superblock.block_size as usize];
+        // Start at the first data block (root directory block)
+        let mut inode_number = 0;
 
-        // Read first data block (root directory block)
-        self.device
-            .read_block(self.superblock.data_block_start, &mut buffer)?;
-        todo!()
+        'components: for component in path_components {
+            let inode = &self.inodes[inode_number as usize];
+            let block_index = inode.direct_block;
+            self.device.read_block(block_index, &mut buffer)?;
+            let mut buffer_cursor = 0;
+
+            while buffer_cursor < buffer.len() {
+                let entry = DirectoryEntry::try_from_bytes(
+                    &buffer[buffer_cursor..buffer_cursor + DIRECTORY_ENTRY_SIZE],
+                )?;
+                if entry.name == component.as_bytes() {
+                    inode_number = entry.inode_number;
+                    let inode_exists = self.inode_bitmap.is_bit_set(inode_number as usize);
+                    if !inode_exists {
+                        return Err(Error::Validation(format!(
+                            "Inode for {} is empty",
+                            component
+                        )));
+                    }
+                    continue 'components;
+                }
+                buffer_cursor += DIRECTORY_ENTRY_SIZE
+            }
+
+            return Err(Error::Validation(format!(
+                "File or directory {} does not exist",
+                component
+            )));
+        }
+
+        Ok(inode_number)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, Error, INODE_COUNT, INODE_SIZE, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, FILE_NAME_SIZE, DIRECTORY_ENTRY_SIZE, DirectoryEntry, Directory};
+    use crate::{
+        BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, DIRECTORY_ENTRY_SIZE, Directory,
+        DirectoryEntry, Error, FILE_NAME_SIZE, INODE_COUNT, INODE_SIZE, ImgFileDisk, MAGIC_NUMBER,
+        Superblock, TOTAL_BLOCKS,
+    };
     use crate::{FileType, Inode, MyFS};
     use std::fs;
     use std::io::Write;
@@ -558,10 +604,22 @@ mod tests {
         assert_eq!(superblock_from_buffer.total_blocks, superblock.total_blocks);
         assert_eq!(superblock_from_buffer.inode_count, superblock.inode_count);
         assert_eq!(superblock_from_buffer.inode_size, superblock.inode_size);
-        assert_eq!(superblock_from_buffer.inode_bitmap_start, superblock.inode_bitmap_start);
-        assert_eq!(superblock_from_buffer.block_bitmap_start, superblock.block_bitmap_start);
-        assert_eq!(superblock_from_buffer.inode_table_start, superblock.inode_table_start);
-        assert_eq!(superblock_from_buffer.data_block_start, superblock.data_block_start);
+        assert_eq!(
+            superblock_from_buffer.inode_bitmap_start,
+            superblock.inode_bitmap_start
+        );
+        assert_eq!(
+            superblock_from_buffer.block_bitmap_start,
+            superblock.block_bitmap_start
+        );
+        assert_eq!(
+            superblock_from_buffer.inode_table_start,
+            superblock.inode_table_start
+        );
+        assert_eq!(
+            superblock_from_buffer.data_block_start,
+            superblock.data_block_start
+        );
     }
 
     #[test]
