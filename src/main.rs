@@ -36,13 +36,13 @@ impl From<io::Error> for Error {
 }
 
 trait BlockDevice {
-    fn read_block(&mut self, block_index: u32, buffer: &mut [u8]) -> Result<(), Error>;
-    fn write_block(&mut self, block_index: u32, data: &[u8]) -> Result<(), Error>;
+    fn read_block(&mut self, block_index: u32, buffer: &mut BlockBuffer) -> Result<(), Error>;
+    fn write_block(&mut self, block_index: u32, data: &mut BlockBuffer) -> Result<(), Error>;
     fn block_size(&self) -> u32;
     fn total_blocks(&self) -> u32;
 }
 
-struct BlockBuffer<'a>(&'a mut [u8]);
+struct BlockBuffer([u8; BLOCK_SIZE as usize]);
 
 struct ImgFileDisk {
     file: File,
@@ -98,6 +98,25 @@ struct DirectoryEntry {
 
 struct Directory(Vec<DirectoryEntry>);
 
+impl BlockBuffer {
+    fn new() -> Self {
+        Self([0u8; BLOCK_SIZE as usize])
+    }
+}
+
+impl Deref for BlockBuffer {
+    type Target = [u8; BLOCK_SIZE as usize];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for BlockBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl Deref for Bitmap {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
@@ -112,12 +131,12 @@ impl DerefMut for Bitmap {
 }
 
 impl Bitmap {
-    fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+    fn new(bytes: &BlockBuffer) -> Self {
+        Self(bytes.to_vec())
     }
 
     fn create_and_occupy_first_n_bits(occupied_offset: usize) -> Self {
-        let mut bitmap = Self::new(vec![0u8; BLOCK_SIZE as usize]);
+        let mut bitmap = Self::new(&BlockBuffer::new());
         let full_bytes = occupied_offset / 8;
         let remaining_bits = occupied_offset % 8;
 
@@ -399,7 +418,7 @@ impl ImgFileDisk {
 }
 
 impl BlockDevice for ImgFileDisk {
-    fn read_block(&mut self, block_index: u32, buffer: &mut [u8]) -> Result<(), Error> {
+    fn read_block(&mut self, block_index: u32, buffer: &mut BlockBuffer) -> Result<(), Error> {
         if buffer.len() < self.block_size as usize {
             return Err(Error::Validation(
                 "Buffer is too small to contain a block".to_string(),
@@ -411,13 +430,13 @@ impl BlockDevice for ImgFileDisk {
                 Error::IO("Could not seek while reading block from img file".to_string())
             })?;
         self.file
-            .read_exact(buffer)
+            .read_exact(buffer.deref_mut())
             .map_err(|_| Error::IO("Could not read block from img file".to_string()))?;
 
         Ok(())
     }
 
-    fn write_block(&mut self, block_index: u32, buffer: &[u8]) -> Result<(), Error> {
+    fn write_block(&mut self, block_index: u32, buffer: &mut BlockBuffer) -> Result<(), Error> {
         if buffer.len() < self.block_size as usize {
             return Err(Error::Validation(
                 "Buffer is too small to contain a block".to_string(),
@@ -427,7 +446,7 @@ impl BlockDevice for ImgFileDisk {
             .seek(SeekFrom::Start((block_index * self.block_size) as u64))
             .map_err(|_| Error::IO("Could not seek while writing block to img file".to_string()))?;
         self.file
-            .write_all(buffer)
+            .write_all(buffer.deref_mut())
             .map_err(|_| Error::IO("Could not write block to img file".to_string()))?;
 
         Ok(())
@@ -446,9 +465,9 @@ impl BlockDevice for ImgFileDisk {
 impl<D: BlockDevice> MyFS<D> {
     fn mount(mut device: D) -> Result<Self, Error> {
         // Read superblock
-        let mut buffer = vec![0u8; device.block_size() as usize];
+        let mut buffer = BlockBuffer::new();
         device.read_block(0, &mut buffer)?;
-        let superblock = Superblock::try_from_bytes(&buffer)?;
+        let superblock = Superblock::try_from_bytes(&buffer.to_vec())?;
 
         // Validate magic number
         if superblock.magic_number != MAGIC_NUMBER {
@@ -459,10 +478,10 @@ impl<D: BlockDevice> MyFS<D> {
 
         // Load bitmaps
         device.read_block(superblock.inode_bitmap_start, &mut buffer)?;
-        let inode_bitmap = Bitmap::new(buffer.clone());
+        let inode_bitmap = Bitmap::new(&buffer);
 
         device.read_block(superblock.block_bitmap_start, &mut buffer)?;
-        let block_bitmap = Bitmap::new(buffer.clone());
+        let block_bitmap = Bitmap::new(&buffer);
 
         device.read_block(superblock.inode_table_start, &mut buffer)?;
         let inodes = buffer
@@ -483,14 +502,15 @@ impl<D: BlockDevice> MyFS<D> {
     fn format(device: &mut D) -> Result<(), Error> {
         // Replace all blocks with zeros
         let total_blocks = device.total_blocks();
+        let mut buffer = BlockBuffer::new();
         for block_index in 0..total_blocks {
             device.write_block(
                 block_index,
-                vec![0u8; device.block_size() as usize].as_slice(),
+                &mut buffer,
             )?;
         }
 
-        let mut buffer = vec![0u8; device.block_size() as usize];
+        // let mut buffer = vec![0u8; device.block_size() as usize];
 
         // Write superblock
         let super_block = Superblock {
@@ -506,25 +526,25 @@ impl<D: BlockDevice> MyFS<D> {
             data_block_start: 4,
         };
         buffer.copy_from_slice(super_block.to_bytes().as_slice());
-        device.write_block(0, buffer.as_slice())?;
+        device.write_block(0, &mut buffer)?;
 
         // Write inode bitmap block
         // Leave 1 bit occupied for the root directory inode
         let inode_bitmap = Bitmap::create_and_occupy_first_n_bits(1);
         buffer.copy_from_slice(&inode_bitmap);
-        device.write_block(1, buffer.as_slice())?;
+        device.write_block(1, &mut buffer)?;
 
         // Write block bitmap block
         // Leave 5 bits occupied; 4 for metadata blocks, 1 for root directory block
         let block_bitmap = Bitmap::create_and_occupy_first_n_bits(5);
         buffer.copy_from_slice(&block_bitmap);
-        device.write_block(2, buffer.as_slice())?;
+        device.write_block(2, &mut buffer)?;
 
         // Write inode table
         let root_directory_inode = Inode::new(FileType::Directory, 0, 4);
         buffer.fill(0u8);
         buffer[0..INODE_SIZE as usize].copy_from_slice(root_directory_inode.to_bytes().as_slice());
-        device.write_block(3, buffer.as_slice())?;
+        device.write_block(3, &mut buffer)?;
 
         Ok(())
     }
@@ -534,7 +554,7 @@ impl<D: BlockDevice> MyFS<D> {
             .split('/')
             .filter(|&c| !c.is_empty())
             .collect::<Vec<&str>>();
-        let mut buffer = vec![0u8; self.superblock.block_size as usize];
+        let mut buffer = BlockBuffer::new();
         // Start at the first data block (root directory block)
         let mut inode_number = 0;
         let mut current_dir_name = "~";
@@ -582,7 +602,7 @@ impl<D: BlockDevice> MyFS<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, INODE_COUNT, INODE_SIZE, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, Filename, DATA_BLOCK_START, INODE_BITMAP_BLOCK, INODE_TABLE_BLOCK};
+    use crate::{BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, INODE_COUNT, INODE_SIZE, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, Filename, DATA_BLOCK_START, INODE_BITMAP_BLOCK, INODE_TABLE_BLOCK, BlockBuffer};
     use crate::{FileType, Inode, MyFS};
     use std::fs;
     use std::io::Write;
@@ -846,7 +866,7 @@ mod tests {
         file.write_all(&data).unwrap();
 
         let mut disk = ImgFileDisk::open(path).unwrap();
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         let result = disk.read_block(1, &mut buffer);
 
         assert!(result.is_ok());
@@ -856,26 +876,27 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    #[test]
-    fn img_file_disk_read_block_buffer_too_small() {
-        let path = Path::new("test_read_small_buffer.img");
-        let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
-            .unwrap();
-        drop(file);
-
-        let mut disk = ImgFileDisk::open(path).unwrap();
-        let mut buffer = vec![0u8; (BLOCK_SIZE - 1) as usize];
-        let result = disk.read_block(0, &mut buffer);
-
-        assert!(result.is_err());
-        assert_eq!(
-            result.err().unwrap(),
-            Error::Validation("Buffer is too small to contain a block".to_string())
-        );
-
-        fs::remove_file(path).unwrap();
-    }
+    // TODO: This test is now obsolete because BlockBuffer type eliminates the possibility of too small or too big buffers.
+    // #[test]
+    // fn img_file_disk_read_block_buffer_too_small() {
+    //     let path = Path::new("test_read_small_buffer.img");
+    //     let mut file = fs::File::create(path).unwrap();
+    //     file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+    //         .unwrap();
+    //     drop(file);
+    //
+    //     let mut disk = ImgFileDisk::open(path).unwrap();
+    //     let mut buffer = BlockBuffer::new();
+    //     let result = disk.read_block(0, &mut buffer);
+    //
+    //     assert!(result.is_err());
+    //     assert_eq!(
+    //         result.err().unwrap(),
+    //         Error::Validation("Buffer is too small to contain a block".to_string())
+    //     );
+    //
+    //     fs::remove_file(path).unwrap();
+    // }
 
     #[test]
     fn img_file_disk_write_block() {
@@ -887,39 +908,40 @@ mod tests {
 
         let mut disk = ImgFileDisk::open(path).unwrap();
         let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         buffer[0..4].copy_from_slice(&data);
 
-        let write_result = disk.write_block(2, &buffer);
+        let write_result = disk.write_block(2, &mut buffer);
+        buffer.fill(0);
         assert!(write_result.is_ok());
 
-        let mut read_buffer = vec![0u8; BLOCK_SIZE as usize];
-        disk.read_block(2, &mut read_buffer).unwrap();
-        assert_eq!(read_buffer[0..4], data[..]);
+        disk.read_block(2, &mut buffer).unwrap();
+        assert_eq!(buffer[0..4], data[..]);
 
         fs::remove_file(path).unwrap();
     }
 
-    #[test]
-    fn img_file_disk_write_block_buffer_too_small() {
-        let path = Path::new("test_write_small_buffer.img");
-        let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
-            .unwrap();
-        drop(file);
-
-        let mut disk = ImgFileDisk::open(path).unwrap();
-        let buffer = vec![0u8; (BLOCK_SIZE - 1) as usize];
-        let result = disk.write_block(0, &buffer);
-
-        assert!(result.is_err());
-        assert_eq!(
-            result.err().unwrap(),
-            Error::Validation("Buffer is too small to contain a block".to_string())
-        );
-
-        fs::remove_file(path).unwrap();
-    }
+    // TODO: This test is now obsolete because BlockBuffer type eliminates the possibility of too small or too big buffers.
+    // #[test]
+    // fn img_file_disk_write_block_buffer_too_small() {
+    //     let path = Path::new("test_write_small_buffer.img");
+    //     let mut file = fs::File::create(path).unwrap();
+    //     file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+    //         .unwrap();
+    //     drop(file);
+    //
+    //     let mut disk = ImgFileDisk::open(path).unwrap();
+    //     let buffer = BlockBuffer([0u8; (BLOCK_SIZE - 1) as usize]);
+    //     let result = disk.write_block(0, &mut buffer);
+    //
+    //     assert!(result.is_err());
+    //     assert_eq!(
+    //         result.err().unwrap(),
+    //         Error::Validation("Buffer is too small to contain a block".to_string())
+    //     );
+    //
+    //     fs::remove_file(path).unwrap();
+    // }
 
     #[test]
     fn img_file_disk_block_size() {
@@ -959,13 +981,13 @@ mod tests {
         drop(file);
 
         let mut disk = ImgFileDisk::open(path).unwrap();
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
 
         // Ensure the data exists in the file
         for block_index in 0..TOTAL_BLOCKS {
             disk.read_block(block_index, &mut buffer).unwrap();
         }
-        assert_eq!(buffer, vec![0xFFu8; BLOCK_SIZE as usize]);
+        assert_eq!(buffer.0, [0xFFu8; BLOCK_SIZE as usize]);
 
         // Format the disk
         MyFS::format(&mut disk).unwrap();
@@ -974,7 +996,7 @@ mod tests {
         for block_index in 0..TOTAL_BLOCKS {
             disk.read_block(block_index, &mut buffer).unwrap();
         }
-        assert_eq!(buffer, vec![0u8; BLOCK_SIZE as usize]);
+        assert_eq!(buffer.0, [0u8; BLOCK_SIZE as usize]);
 
         fs::remove_file(path).unwrap();
     }
@@ -987,10 +1009,10 @@ mod tests {
         let mut disk = ImgFileDisk::open(path).unwrap();
         MyFS::format(&mut disk).unwrap();
 
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         disk.read_block(0, &mut buffer).unwrap();
 
-        let superblock = Superblock::try_from_bytes(&buffer).unwrap();
+        let superblock = Superblock::try_from_bytes(&buffer.to_vec()).unwrap();
         assert_eq!(superblock.magic_number, MAGIC_NUMBER);
         assert_eq!(superblock.version, 1);
         assert_eq!(superblock.block_size, BLOCK_SIZE);
@@ -1013,10 +1035,10 @@ mod tests {
         let mut disk = ImgFileDisk::open(path).unwrap();
         MyFS::format(&mut disk).unwrap();
 
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         disk.read_block(1, &mut buffer).unwrap();
 
-        let inode_bitmap = Bitmap(buffer);
+        let inode_bitmap = Bitmap::new(&buffer);
         assert!(inode_bitmap.is_bit_set(0));
         assert!(!inode_bitmap.is_bit_set(1));
 
@@ -1031,10 +1053,10 @@ mod tests {
         let mut disk = ImgFileDisk::open(path).unwrap();
         MyFS::format(&mut disk).unwrap();
 
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         disk.read_block(2, &mut buffer).unwrap();
 
-        let data_bitmap = Bitmap(buffer);
+        let data_bitmap = Bitmap::new(&buffer);
         assert!(data_bitmap.is_bit_set(0));
         assert!(data_bitmap.is_bit_set(1));
         assert!(data_bitmap.is_bit_set(2));
@@ -1053,7 +1075,7 @@ mod tests {
         let mut disk = ImgFileDisk::open(path).unwrap();
         MyFS::format(&mut disk).unwrap();
 
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         disk.read_block(3, &mut buffer).unwrap();
 
         let root_inode = Inode::try_from_bytes(&buffer[0..INODE_SIZE as usize]).unwrap();
@@ -1254,7 +1276,7 @@ mod tests {
         let mut disk = ImgFileDisk::open(path).unwrap();
         MyFS::format(&mut disk).unwrap();
         let mut fs = MyFS::mount(disk).unwrap();
-        let mut block_buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut block_buffer = BlockBuffer::new();
 
         // Create a directory entry in root
         let name = Filename::new("dir".to_string());
@@ -1267,20 +1289,20 @@ mod tests {
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
         block_buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
-        fs.device.write_block(4, &block_buffer).unwrap();
+        fs.device.write_block(4, &mut block_buffer).unwrap();
         block_buffer.fill(0);
 
         // Set inode 1 in bitmap
         fs.inode_bitmap.set_bit(1);
         block_buffer.copy_from_slice(&fs.inode_bitmap);
-        fs.device.write_block(1, &block_buffer).unwrap();
+        fs.device.write_block(1, &mut block_buffer).unwrap();
         block_buffer.fill(0);
 
         // Create inode 1
         let inode = Inode::new(FileType::Directory, 0, 5);
         fs.inodes.insert(1, inode);
         block_buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inode.to_bytes());
-        fs.device.write_block(3, &block_buffer).unwrap();
+        fs.device.write_block(3, &mut block_buffer).unwrap();
 
         // Reload filesystem
         drop(fs);
@@ -1288,7 +1310,7 @@ mod tests {
         let mut fs = MyFS::mount(disk).unwrap();
 
         let result = fs.resolve_path("/dir");
-        // println!("{:?}", result.err());
+
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 1);
 
@@ -1314,9 +1336,9 @@ mod tests {
         };
         let directory1 = Directory(vec![entry1]);
         let dir_bytes1 = directory1.to_bytes();
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes1.len()].copy_from_slice(&dir_bytes1);
-        fs.device.write_block(4, &buffer).unwrap();
+        fs.device.write_block(4, &mut buffer).unwrap();
 
         // Create second level directory entry (inode 1, block 5)
         let name2 = Filename::new("subdir".to_string());
@@ -1330,21 +1352,21 @@ mod tests {
         let dir_bytes2 = directory2.to_bytes();
         buffer.fill(0);
         buffer[0..dir_bytes2.len()].copy_from_slice(&dir_bytes2);
-        fs.device.write_block(5, &buffer).unwrap();
+        fs.device.write_block(5, &mut buffer).unwrap();
 
         // Set inodes in bitmap
         fs.inode_bitmap.set_bit(1);
         fs.inode_bitmap.set_bit(2);
         buffer.fill(0);
         buffer.copy_from_slice(&fs.inode_bitmap);
-        fs.device.write_block(1, &buffer).unwrap();
+        fs.device.write_block(1, &mut buffer).unwrap();
 
         // Set blocks in bitmap
         fs.block_bitmap.set_bit(5);
         fs.block_bitmap.set_bit(6);
         buffer.fill(0);
         buffer.copy_from_slice(&fs.block_bitmap);
-        fs.device.write_block(2, &buffer).unwrap();
+        fs.device.write_block(2, &mut buffer).unwrap();
 
         // Create inodes
         let inode1 = Inode::new(FileType::Directory, 0, 5);
@@ -1352,7 +1374,7 @@ mod tests {
         buffer.fill(0);
         buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inode1.to_bytes());
         buffer[(2 * INODE_SIZE as usize)..(3 * INODE_SIZE as usize)].copy_from_slice(&inode2.to_bytes());
-        fs.device.write_block(3, &buffer).unwrap();
+        fs.device.write_block(3, &mut buffer).unwrap();
 
         // Reload filesystem
         drop(fs);
@@ -1404,15 +1426,15 @@ mod tests {
         };
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
-        fs.device.write_block(DATA_BLOCK_START, &buffer).unwrap();
+        fs.device.write_block(DATA_BLOCK_START, &mut buffer).unwrap();
         buffer.fill(0);
 
         // Set inode 1 in bitmap
         fs.inode_bitmap.set_bit(1);
         buffer.copy_from_slice(&fs.inode_bitmap);
-        fs.device.write_block(INODE_BITMAP_BLOCK, &buffer).unwrap();
+        fs.device.write_block(INODE_BITMAP_BLOCK, &mut buffer).unwrap();
         buffer.fill(0);
 
         // Create inode 1
@@ -1425,7 +1447,7 @@ mod tests {
         });
         buffer[0..inodes_bytes.len()].copy_from_slice(&inodes_bytes);
         // buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inodes_bytes);
-        fs.device.write_block(INODE_TABLE_BLOCK, &buffer).unwrap();
+        fs.device.write_block(INODE_TABLE_BLOCK, &mut buffer).unwrap();
         buffer.fill(0);
 
         // Reload filesystem
@@ -1462,21 +1484,21 @@ mod tests {
         };
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
-        fs.device.write_block(4, &buffer).unwrap();
+        fs.device.write_block(4, &mut buffer).unwrap();
 
         // Set inode 1 in bitmap
         fs.inode_bitmap.set_bit(1);
         buffer.fill(0);
         buffer.copy_from_slice(&fs.inode_bitmap);
-        fs.device.write_block(1, &buffer).unwrap();
+        fs.device.write_block(1, &mut buffer).unwrap();
 
         // Create inode 1
         let inode = Inode::new(FileType::Directory, 0, 5);
         buffer.fill(0);
         buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inode.to_bytes());
-        fs.device.write_block(3, &buffer).unwrap();
+        fs.device.write_block(3, &mut buffer).unwrap();
 
         // Reload filesystem
         drop(fs);
@@ -1509,9 +1531,9 @@ mod tests {
         };
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
-        let mut buffer = vec![0u8; BLOCK_SIZE as usize];
+        let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
-        fs.device.write_block(DATA_BLOCK_START, &buffer).unwrap();
+        fs.device.write_block(DATA_BLOCK_START, &mut buffer).unwrap();
 
         // Do NOT set inode 1 in bitmap
 
