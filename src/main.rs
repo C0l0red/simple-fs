@@ -27,6 +27,7 @@ const DATA_BLOCK_START: u32 = 4;
 enum Error {
     Validation(String),
     IO(String),
+    EntryNotFound { entry: String, directory: String },
 }
 
 impl From<io::Error> for Error {
@@ -101,6 +102,10 @@ struct Directory(Vec<DirectoryEntry>);
 impl BlockBuffer {
     fn new() -> Self {
         Self([0u8; BLOCK_SIZE as usize])
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(|&b| b == 0)
     }
 }
 
@@ -360,7 +365,8 @@ impl BytesSerializable for Directory {
             buffer[start_index..start_index + 4].copy_from_slice(&entry.inode_number.to_le_bytes());
             buffer[start_index + 4] = entry.file_type as u8;
             buffer[start_index + 5] = entry.name_length;
-            buffer[start_index + 6..start_index + 6 + FILE_NAME_SIZE].copy_from_slice(&entry.name.0);
+            buffer[start_index + 6..start_index + 6 + FILE_NAME_SIZE]
+                .copy_from_slice(&entry.name.0);
         }
 
         buffer
@@ -504,10 +510,7 @@ impl<D: BlockDevice> MyFS<D> {
         let total_blocks = device.total_blocks();
         let mut buffer = BlockBuffer::new();
         for block_index in 0..total_blocks {
-            device.write_block(
-                block_index,
-                &mut buffer,
-            )?;
+            device.write_block(block_index, &mut buffer)?;
         }
 
         // let mut buffer = vec![0u8; device.block_size() as usize];
@@ -564,11 +567,17 @@ impl<D: BlockDevice> MyFS<D> {
             if inode.file_type != FileType::Directory {
                 return Err(Error::Validation(format!(
                     "Path component {current_dir_name} is not a directory",
-                )))
+                )));
             }
 
             let block_index = inode.direct_block;
             self.device.read_block(block_index, &mut buffer)?;
+            if buffer.is_empty() {
+                return Err(Error::EntryNotFound {
+                    entry: component.to_string(),
+                    directory: current_dir_name.to_string(),
+                });
+            }
             let mut buffer_cursor = 0;
 
             while buffer_cursor < buffer.len() {
@@ -590,10 +599,10 @@ impl<D: BlockDevice> MyFS<D> {
                 buffer_cursor += DIRECTORY_ENTRY_SIZE
             }
 
-            return Err(Error::Validation(format!(
-                "File or directory {} does not exist",
-                component
-            )));
+            return Err(Error::EntryNotFound {
+                entry: component.to_string(),
+                directory: current_dir_name.to_string(),
+            });
         }
 
         Ok(inode_number)
@@ -602,7 +611,12 @@ impl<D: BlockDevice> MyFS<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BLOCK_SIZE, Bitmap, BlockDevice, BytesSerializable, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, INODE_COUNT, INODE_SIZE, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, Filename, DATA_BLOCK_START, INODE_BITMAP_BLOCK, INODE_TABLE_BLOCK, BlockBuffer};
+    use crate::{
+        BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BytesSerializable, DATA_BLOCK_START,
+        DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, Filename,
+        INODE_BITMAP_BLOCK, INODE_COUNT, INODE_SIZE, INODE_TABLE_BLOCK, ImgFileDisk, MAGIC_NUMBER,
+        Superblock, TOTAL_BLOCKS,
+    };
     use crate::{FileType, Inode, MyFS};
     use std::fs;
     use std::io::Write;
@@ -1301,7 +1315,8 @@ mod tests {
         // Create inode 1
         let inode = Inode::new(FileType::Directory, 0, 5);
         fs.inodes.insert(1, inode);
-        block_buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inode.to_bytes());
+        block_buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)]
+            .copy_from_slice(&inode.to_bytes());
         fs.device.write_block(3, &mut block_buffer).unwrap();
 
         // Reload filesystem
@@ -1373,7 +1388,8 @@ mod tests {
         let inode2 = Inode::new(FileType::Directory, 0, 6);
         buffer.fill(0);
         buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inode1.to_bytes());
-        buffer[(2 * INODE_SIZE as usize)..(3 * INODE_SIZE as usize)].copy_from_slice(&inode2.to_bytes());
+        buffer[(2 * INODE_SIZE as usize)..(3 * INODE_SIZE as usize)]
+            .copy_from_slice(&inode2.to_bytes());
         fs.device.write_block(3, &mut buffer).unwrap();
 
         // Reload filesystem
@@ -1401,7 +1417,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Error::Validation("File or directory nonexistent does not exist".to_string())
+            Error::EntryNotFound { entry: "nonexistent".to_string(), directory: "~".to_string() }
         );
 
         fs::remove_file(path).unwrap();
@@ -1428,13 +1444,17 @@ mod tests {
         let dir_bytes = directory.to_bytes();
         let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
-        fs.device.write_block(DATA_BLOCK_START, &mut buffer).unwrap();
+        fs.device
+            .write_block(DATA_BLOCK_START, &mut buffer)
+            .unwrap();
         buffer.fill(0);
 
         // Set inode 1 in bitmap
         fs.inode_bitmap.set_bit(1);
         buffer.copy_from_slice(&fs.inode_bitmap);
-        fs.device.write_block(INODE_BITMAP_BLOCK, &mut buffer).unwrap();
+        fs.device
+            .write_block(INODE_BITMAP_BLOCK, &mut buffer)
+            .unwrap();
         buffer.fill(0);
 
         // Create inode 1
@@ -1447,7 +1467,9 @@ mod tests {
         });
         buffer[0..inodes_bytes.len()].copy_from_slice(&inodes_bytes);
         // buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inodes_bytes);
-        fs.device.write_block(INODE_TABLE_BLOCK, &mut buffer).unwrap();
+        fs.device
+            .write_block(INODE_TABLE_BLOCK, &mut buffer)
+            .unwrap();
         buffer.fill(0);
 
         // Reload filesystem
@@ -1459,7 +1481,10 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Error::Validation("File or directory nonexistent does not exist".to_string())
+            Error::EntryNotFound {
+                entry: "nonexistent".to_string(),
+                directory: "dir".to_string()
+            }
         );
 
         fs::remove_file(path).unwrap();
@@ -1533,7 +1558,9 @@ mod tests {
         let dir_bytes = directory.to_bytes();
         let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
-        fs.device.write_block(DATA_BLOCK_START, &mut buffer).unwrap();
+        fs.device
+            .write_block(DATA_BLOCK_START, &mut buffer)
+            .unwrap();
 
         // Do NOT set inode 1 in bitmap
 
