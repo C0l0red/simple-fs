@@ -56,7 +56,7 @@ struct MyFS<D: BlockDevice> {
     superblock: Superblock,
     inode_bitmap: Bitmap,
     block_bitmap: Bitmap,
-    inodes: Vec<Inode>,
+    inodes: InodeTable,
 }
 
 struct Superblock {
@@ -80,6 +80,8 @@ struct Inode {
     size: u32,
     direct_block: u32,
 }
+
+struct InodeTable(Vec<Option<Inode>>);
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -183,7 +185,7 @@ impl TryFrom<u8> for FileType {
         match value {
             0 => Ok(Self::File),
             1 => Ok(Self::Directory),
-            _ => Err(Error::Validation("Invalid inode kind".to_string())),
+            _ => Err(Error::Validation("Invalid inode file type".to_string())),
         }
     }
 }
@@ -195,6 +197,19 @@ impl Inode {
             size,
             direct_block,
         }
+    }
+}
+
+impl Deref for InodeTable {
+    type Target = Vec<Option<Inode>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for InodeTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -274,6 +289,36 @@ impl BytesSerializable for Inode {
             size: Self::bytes_to_u32(&buffer[1..5])?,
             direct_block: Self::bytes_to_u32(&buffer[5..9])?,
         })
+    }
+}
+impl BytesSerializable for InodeTable {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![0u8; INODE_COUNT as usize * INODE_SIZE as usize];
+        for (index, inode) in self.iter().enumerate() {
+            if let Some(inode) = inode {
+                bytes[index * INODE_SIZE as usize..(index + 1) * INODE_SIZE as usize].copy_from_slice(&inode.to_bytes());
+            }
+        }
+
+        bytes
+    }
+
+    fn try_from_bytes(bytes: &[u8]) -> Result<Self, Error>
+    where
+        Self: Sized
+    {
+        let inodes = bytes
+            .chunks(INODE_SIZE as usize)
+            .take(INODE_COUNT as usize)
+            .map(|chunk| {
+                if chunk.iter().all(|&b| b == 0) {
+                    return Ok(None)
+                }
+                Inode::try_from_bytes(chunk).map(Some)
+            })
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self(inodes))
     }
 }
 
@@ -490,11 +535,7 @@ impl<D: BlockDevice> MyFS<D> {
         let block_bitmap = Bitmap::new(&buffer);
 
         device.read_block(superblock.inode_table_start, &mut buffer)?;
-        let inodes = buffer
-            .chunks(superblock.inode_size as usize)
-            .take(superblock.inode_count as usize)
-            .map(|chunk| Inode::try_from_bytes(chunk))
-            .collect::<Result<_, _>>()?;
+        let inodes = InodeTable::try_from_bytes(&buffer.to_vec())?;
 
         Ok(MyFS {
             device,
@@ -563,7 +604,12 @@ impl<D: BlockDevice> MyFS<D> {
         let mut current_dir_name = "~";
 
         'components: for component in path_components {
-            let inode = &self.inodes[inode_number as usize];
+            let inode = &self.inodes[inode_number as usize].ok_or_else(|| {
+                Error::Validation(format!(
+                    "Inode for {} does not exist",
+                    current_dir_name
+                ))
+            })?;
             if inode.file_type != FileType::Directory {
                 return Err(Error::Validation(format!(
                     "Path component {current_dir_name} is not a directory",
@@ -1314,9 +1360,9 @@ mod tests {
 
         // Create inode 1
         let inode = Inode::new(FileType::Directory, 0, 5);
-        fs.inodes.insert(1, inode);
-        block_buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)]
-            .copy_from_slice(&inode.to_bytes());
+        fs.inodes.insert(1, Some(inode));
+        let inode_table_bytes = fs.inodes.to_bytes();
+        block_buffer[0..inode_table_bytes.len()].copy_from_slice(&inode_table_bytes);
         fs.device.write_block(3, &mut block_buffer).unwrap();
 
         // Reload filesystem
@@ -1382,14 +1428,15 @@ mod tests {
         buffer.fill(0);
         buffer.copy_from_slice(&fs.block_bitmap);
         fs.device.write_block(2, &mut buffer).unwrap();
+        buffer.fill(0);
 
         // Create inodes
         let inode1 = Inode::new(FileType::Directory, 0, 5);
         let inode2 = Inode::new(FileType::Directory, 0, 6);
-        buffer.fill(0);
-        buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inode1.to_bytes());
-        buffer[(2 * INODE_SIZE as usize)..(3 * INODE_SIZE as usize)]
-            .copy_from_slice(&inode2.to_bytes());
+        fs.inodes.insert(1, Some(inode1));
+        fs.inodes.insert(2, Some(inode2));
+        let inode_table_bytes = fs.inodes.to_bytes();
+        buffer[0..inode_table_bytes.len()].copy_from_slice(&inode_table_bytes);
         fs.device.write_block(3, &mut buffer).unwrap();
 
         // Reload filesystem
@@ -1458,15 +1505,10 @@ mod tests {
         buffer.fill(0);
 
         // Create inode 1
-        let inodes = &mut fs.inodes;
         let inode = Inode::new(FileType::Directory, 0, 5);
-        inodes.insert(1, inode);
-        let inodes_bytes = inodes.iter().fold(vec![], |mut byte_array, inode| {
-            byte_array.extend(inode.to_bytes());
-            byte_array
-        });
+        fs.inodes.insert(1, Some(inode));
+        let inodes_bytes = fs.inodes.to_bytes();
         buffer[0..inodes_bytes.len()].copy_from_slice(&inodes_bytes);
-        // buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inodes_bytes);
         fs.device
             .write_block(INODE_TABLE_BLOCK, &mut buffer)
             .unwrap();
@@ -1518,11 +1560,13 @@ mod tests {
         buffer.fill(0);
         buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device.write_block(1, &mut buffer).unwrap();
+        buffer.fill(0);
 
         // Create inode 1
         let inode = Inode::new(FileType::Directory, 0, 5);
-        buffer.fill(0);
-        buffer[INODE_SIZE as usize..(2 * INODE_SIZE as usize)].copy_from_slice(&inode.to_bytes());
+        fs.inodes.insert(1, Some(inode));
+        let inode_table_bytes = fs.inodes.to_bytes();
+        buffer[0..inode_table_bytes.len()].copy_from_slice(&inode_table_bytes);
         fs.device.write_block(3, &mut buffer).unwrap();
 
         // Reload filesystem
