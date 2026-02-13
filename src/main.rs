@@ -28,6 +28,7 @@ enum Error {
     Validation(String),
     IO(String),
     EntryNotFound { entry: String, directory: String },
+    NotFound(String)
 }
 
 impl From<io::Error> for Error {
@@ -653,6 +654,21 @@ impl<D: BlockDevice> MyFS<D> {
 
         Ok(inode_number)
     }
+
+    fn list_directory_entries(&mut self, path: &str) -> Result<Vec<DirectoryEntry>, Error> {
+        let inode_number = self.resolve_path(path)?;
+        let inode = &self.inodes[inode_number as usize].ok_or_else(|| Error::NotFound("Inode for entry missing from inode table".to_string()))?;
+        if inode.file_type != FileType::Directory {
+            return Err(Error::Validation("Entry is not a directory".to_string()));
+        }
+
+        let block_index = inode.direct_block;
+        let mut buffer = BlockBuffer::new();
+        self.device.read_block(block_index, &mut buffer)?;
+        let directory = Directory::try_from_bytes(&buffer.to_vec())?;
+
+        Ok(directory.0)
+    }
 }
 
 #[cfg(test)]
@@ -964,7 +980,6 @@ mod tests {
         let mut file = fs::File::create(path).unwrap();
         file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
             .unwrap();
-        drop(file);
 
         let mut disk = ImgFileDisk::open(path).unwrap();
         let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
@@ -1009,7 +1024,6 @@ mod tests {
         let mut file = fs::File::create(path).unwrap();
         file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
             .unwrap();
-        drop(file);
 
         let disk = ImgFileDisk::open(path).unwrap();
         assert_eq!(disk.block_size(), BLOCK_SIZE);
@@ -1023,7 +1037,6 @@ mod tests {
         let mut file = fs::File::create(path).unwrap();
         file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
             .unwrap();
-        drop(file);
 
         let disk = ImgFileDisk::open(path).unwrap();
         assert_eq!(disk.total_blocks(), TOTAL_BLOCKS);
@@ -1038,7 +1051,6 @@ mod tests {
         // Write data into all blocks in the file
         file.write_all(&vec![0xFF; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
             .unwrap();
-        drop(file);
 
         let mut disk = ImgFileDisk::open(path).unwrap();
         let mut buffer = BlockBuffer::new();
@@ -1165,7 +1177,6 @@ mod tests {
         let mut file = fs::File::create(path).unwrap();
         file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
             .unwrap();
-        drop(file);
 
         let disk = ImgFileDisk::open(path).unwrap();
         let result = MyFS::mount(disk);
@@ -1198,7 +1209,6 @@ mod tests {
         data[36..40].copy_from_slice(&4u32.to_le_bytes()); // data_block_start
 
         file.write_all(&data).unwrap();
-        drop(file);
 
         let disk = ImgFileDisk::open(path).unwrap();
         let fs = MyFS::mount(disk).unwrap();
@@ -1238,7 +1248,6 @@ mod tests {
         data[BLOCK_SIZE as usize] = 0b00000001;
 
         file.write_all(&data).unwrap();
-        drop(file);
 
         let disk = ImgFileDisk::open(path).unwrap();
         let fs = MyFS::mount(disk).unwrap();
@@ -1270,7 +1279,6 @@ mod tests {
         data[(2 * BLOCK_SIZE) as usize] = 0b00011111;
 
         file.write_all(&data).unwrap();
-        drop(file);
 
         let disk = ImgFileDisk::open(path).unwrap();
         let fs = MyFS::mount(disk).unwrap();
@@ -1303,7 +1311,6 @@ mod tests {
         data[36..40].copy_from_slice(&4u32.to_le_bytes()); // data_block_start
 
         file.write_all(&data).unwrap();
-        drop(file);
 
         let disk = ImgFileDisk::open(path).unwrap();
         let result = MyFS::mount(disk);
@@ -1366,7 +1373,6 @@ mod tests {
         fs.device.write_block(3, &mut block_buffer).unwrap();
 
         // Reload filesystem
-        drop(fs);
         let disk = ImgFileDisk::open(path).unwrap();
         let mut fs = MyFS::mount(disk).unwrap();
 
@@ -1440,7 +1446,6 @@ mod tests {
         fs.device.write_block(3, &mut buffer).unwrap();
 
         // Reload filesystem
-        drop(fs);
         let disk = ImgFileDisk::open(path).unwrap();
         let mut fs = MyFS::mount(disk).unwrap();
 
@@ -1515,7 +1520,6 @@ mod tests {
         buffer.fill(0);
 
         // Reload filesystem
-        drop(fs);
         let disk = ImgFileDisk::open(path).unwrap();
         let mut fs = MyFS::mount(disk).unwrap();
 
@@ -1570,7 +1574,6 @@ mod tests {
         fs.device.write_block(3, &mut buffer).unwrap();
 
         // Reload filesystem
-        drop(fs);
         let disk = ImgFileDisk::open(path).unwrap();
         let mut fs = MyFS::mount(disk).unwrap();
 
@@ -1609,7 +1612,6 @@ mod tests {
         // Do NOT set inode 1 in bitmap
 
         // Reload filesystem
-        drop(fs);
         let disk = ImgFileDisk::open(path).unwrap();
         let mut fs = MyFS::mount(disk).unwrap();
 
