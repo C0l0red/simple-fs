@@ -26,13 +26,13 @@ const FILE_NAME_SIZE: usize = 250;
 /// Total size of a directory entry in bytes.
 const DIRECTORY_ENTRY_SIZE: usize = 256;
 /// Index of the block containing the inode allocation bitmap.
-const INODE_BITMAP_BLOCK: usize = 1;
+const INODE_BITMAP_BLOCK_INDEX: usize = 1;
 /// Index of the block containing the data block allocation bitmap.
-const BLOCK_BITMAP_BLOCK: usize = 2;
+const BLOCK_BITMAP_BLOCK_INDEX: usize = 2;
 /// Index of the block where the inode table begins.
-const INODE_TABLE_BLOCK: usize = 3;
+const INODE_TABLE_BLOCK_INDEX: usize = 3;
 /// Index of the first data block in the file system.
-const DATA_BLOCK_START: usize = 4;
+const DATA_BLOCK_START_INDEX: usize = 4;
 
 /// Represents various errors that can occur during file system operations.
 #[derive(Debug, PartialEq)]
@@ -497,10 +497,10 @@ impl BytesSerializable for Inode {
 }
 impl BytesSerializable for InodeTable {
     fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![0u8; INODE_COUNT as usize * INODE_SIZE as usize];
+        let mut bytes = vec![0u8; INODE_COUNT * INODE_SIZE];
         for (index, inode) in self.iter().enumerate() {
             if let Some(inode) = inode {
-                bytes[index * INODE_SIZE as usize..(index + 1) * INODE_SIZE as usize].copy_from_slice(&inode.to_bytes());
+                bytes[index * INODE_SIZE..(index + 1) * INODE_SIZE].copy_from_slice(&inode.to_bytes());
             }
         }
 
@@ -512,8 +512,8 @@ impl BytesSerializable for InodeTable {
         Self: Sized
     {
         let inodes = bytes
-            .chunks(INODE_SIZE as usize)
-            .take(INODE_COUNT as usize)
+            .chunks(INODE_SIZE)
+            .take(INODE_COUNT)
             .map(|chunk| {
                 if chunk.iter().all(|&b| b == 0) {
                     return Ok(None)
@@ -821,7 +821,8 @@ impl<D: BlockDevice> MyFS<D> {
         // Write inode table
         let root_directory_inode = Inode::new(FileType::Directory, 0, 4);
         buffer.fill(0u8);
-        buffer[0..INODE_SIZE].copy_from_slice(root_directory_inode.to_bytes().as_slice());
+        buffer[0..INODE_SIZE]
+            .copy_from_slice(root_directory_inode.to_bytes().as_slice());
         device.write_block(3, &mut buffer)?;
 
         Ok(())
@@ -923,9 +924,9 @@ impl<D: BlockDevice> MyFS<D> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BytesSerializable, DATA_BLOCK_START,
+        BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BytesSerializable, DATA_BLOCK_START_INDEX,
         DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, Filename,
-        INODE_BITMAP_BLOCK, INODE_COUNT, INODE_SIZE, INODE_TABLE_BLOCK, ImgFileDisk, MAGIC_NUMBER,
+        INODE_BITMAP_BLOCK_INDEX, INODE_COUNT, INODE_SIZE, INODE_TABLE_BLOCK_INDEX, ImgFileDisk, MAGIC_NUMBER,
         Superblock, TOTAL_BLOCKS,
     };
     use crate::{FileType, Inode, MyFS};
@@ -1198,9 +1199,9 @@ mod tests {
     fn img_file_disk_read_block() {
         let path = Path::new("test_read.img");
         let mut file = fs::File::create(path).unwrap();
-        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
-        data[BLOCK_SIZE as usize] = 0xAB;
-        data[BLOCK_SIZE as usize + 1] = 0xCD;
+        let mut data = vec![0u8; BLOCK_SIZE * TOTAL_BLOCKS];
+        data[BLOCK_SIZE] = 0xAB;
+        data[BLOCK_SIZE + 1] = 0xCD;
         file.write_all(&data).unwrap();
 
         let mut disk = ImgFileDisk::open(path).unwrap();
@@ -1241,7 +1242,7 @@ mod tests {
     fn img_file_disk_write_block() {
         let path = Path::new("test_write.img");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+        file.write_all(&vec![0u8; BLOCK_SIZE * TOTAL_BLOCKS])
             .unwrap();
 
         let mut disk = ImgFileDisk::open(path).unwrap();
@@ -1334,7 +1335,7 @@ mod tests {
         for block_index in 0..TOTAL_BLOCKS {
             disk.read_block(block_index, &mut buffer).unwrap();
         }
-        assert_eq!(buffer.0, [0u8; BLOCK_SIZE as usize]);
+        assert_eq!(buffer.0, [0u8; BLOCK_SIZE]);
 
         fs::remove_file(path).unwrap();
     }
@@ -1420,7 +1421,7 @@ mod tests {
         let mut buffer = BlockBuffer::new();
         disk.read_block(3, &mut buffer).unwrap();
 
-        let root_inode = Inode::try_from_bytes(&buffer[0..INODE_SIZE as usize]).unwrap();
+        let root_inode = Inode::try_from_bytes(&buffer[0..INODE_SIZE]).unwrap();
         assert_eq!(root_inode.file_type, FileType::Directory);
         assert_eq!(root_inode.size, 0);
         assert_eq!(root_inode.direct_block, 4);
@@ -1778,7 +1779,7 @@ mod tests {
         let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
         fs.device
-            .write_block(DATA_BLOCK_START, &mut buffer)
+            .write_block(DATA_BLOCK_START_INDEX, &mut buffer)
             .unwrap();
         buffer.fill(0);
 
@@ -1786,7 +1787,7 @@ mod tests {
         fs.inode_bitmap.set_bit(1);
         buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
-            .write_block(INODE_BITMAP_BLOCK, &mut buffer)
+            .write_block(INODE_BITMAP_BLOCK_INDEX, &mut buffer)
             .unwrap();
         buffer.fill(0);
 
@@ -1796,7 +1797,7 @@ mod tests {
         let inodes_bytes = fs.inodes.to_bytes();
         buffer[0..inodes_bytes.len()].copy_from_slice(&inodes_bytes);
         fs.device
-            .write_block(INODE_TABLE_BLOCK, &mut buffer)
+            .write_block(INODE_TABLE_BLOCK_INDEX, &mut buffer)
             .unwrap();
         buffer.fill(0);
 
@@ -1889,7 +1890,7 @@ mod tests {
         let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
         fs.device
-            .write_block(DATA_BLOCK_START, &mut buffer)
+            .write_block(DATA_BLOCK_START_INDEX, &mut buffer)
             .unwrap();
 
         // Do NOT set inode 1 in bitmap
