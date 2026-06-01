@@ -210,7 +210,7 @@ struct Filename([u8; FILE_NAME_SIZE]);
 /// Represents a single entry within a directory.
 struct DirectoryEntry {
     /// The inode number associated with this entry.
-    inode_number: u32,
+    inode_index: u32,
     /// The type of the file system entry.
     file_type: FileType,
     /// Length of the actual name within the fixed-size buffer.
@@ -229,13 +229,15 @@ impl DirectoryEntry {
     ///
     /// # Returns
     /// * `Result<Self, Error>`: A new `DirectoryEntry` instance or an error if the name length conversion fails.
-    fn try_new(inode_number: u32, file_type: FileType, name: Filename) -> Result<Self, Error> {
+    fn try_new(inode_index: u32, file_type: FileType, name: Filename) -> Result<Self, Error> {
+        let name_length = u8::try_from(name.len()).map_err(|_| {
+            Error::ParseFailed("usize to u8 conversion failed for directory entry".to_string())
+        })?;
+
         Ok(Self {
-            inode_number,
+            inode_index,
             file_type,
-            name_length: u8::try_from(name.len()).map_err(|_| {
-                Error::ParseFailed("usize to u8 conversion failed for directory entry".to_string())
-            })?,
+            name_length,
             name,
         })
     }
@@ -628,7 +630,7 @@ impl BytesSerializable for DirectoryEntry {
     fn to_bytes(&self) -> Vec<u8> {
         let mut bytes: Vec<u8> = vec![0u8; DIRECTORY_ENTRY_SIZE];
 
-        bytes[0..4].copy_from_slice(&self.inode_number.to_le_bytes());
+        bytes[0..4].copy_from_slice(&self.inode_index.to_le_bytes());
         bytes[4] = self.file_type as u8;
         bytes[5] = self.name_length;
         bytes[6..DIRECTORY_ENTRY_SIZE].copy_from_slice(&self.name.0);
@@ -652,7 +654,7 @@ impl BytesSerializable for DirectoryEntry {
         let name = Filename(name);
 
         Ok(Self {
-            inode_number: Self::bytes_to_u32(&bytes[0..4])?,
+            inode_index: Self::bytes_to_u32(&bytes[0..4])?,
             file_type: FileType::try_from(bytes[4])?,
             name_length: bytes[5],
             name,
@@ -669,7 +671,7 @@ impl BytesSerializable for Directory {
         let mut buffer = vec![0u8; DIRECTORY_ENTRY_SIZE * self.len()];
         for (i, entry) in self.iter().enumerate() {
             let start_index = i * DIRECTORY_ENTRY_SIZE;
-            buffer[start_index..start_index + 4].copy_from_slice(&entry.inode_number.to_le_bytes());
+            buffer[start_index..start_index + 4].copy_from_slice(&entry.inode_index.to_le_bytes());
             buffer[start_index + 4] = entry.file_type as u8;
             buffer[start_index + 5] = entry.name_length;
             buffer[start_index + 6..start_index + 6 + FILE_NAME_SIZE]
@@ -696,7 +698,7 @@ impl BytesSerializable for Directory {
             let entry_bytes = &bytes[cursor..cursor + DIRECTORY_ENTRY_SIZE];
             let entry = DirectoryEntry::try_from_bytes(entry_bytes)?;
 
-            if entry.inode_number != 0 {
+            if entry.inode_index != 0 {
                 entries.push(entry);
             }
 
@@ -927,7 +929,7 @@ impl<D: BlockDevice> MyFS<D> {
                     &buffer[buffer_cursor..buffer_cursor + DIRECTORY_ENTRY_SIZE],
                 )?;
                 if entry.name.to_string() == component {
-                    inode_number = entry.inode_number;
+                    inode_number = entry.inode_index;
                     let inode_exists = self.inode_bitmap.is_bit_set(inode_number as usize);
                     if !inode_exists {
                         return Err(Error::Validation(format!(
@@ -1143,7 +1145,7 @@ mod tests {
 
         let entry = DirectoryEntry::try_from_bytes(&bytes).unwrap();
 
-        assert_eq!(entry.inode_number, 123);
+        assert_eq!(entry.inode_index, 123);
         assert_eq!(entry.file_type, FileType::Directory);
         assert_eq!(entry.name_length, 12);
         assert_eq!(&entry.name[0..12], b"applications");
@@ -1198,12 +1200,12 @@ mod tests {
         let directory = Directory::try_from_bytes(&bytes).unwrap();
 
         assert_eq!(directory.len(), 2);
-        assert_eq!(directory[0].inode_number, 10);
+        assert_eq!(directory[0].inode_index, 10);
         assert_eq!(directory[0].file_type, FileType::File);
         assert_eq!(directory[0].name_length, 9);
         assert_eq!(&directory[0].name[0..9], b"test1.txt");
 
-        assert_eq!(directory[1].inode_number, 20);
+        assert_eq!(directory[1].inode_index, 20);
         assert_eq!(directory[1].file_type, FileType::Directory);
         assert_eq!(directory[1].name_length, 9);
         assert_eq!(&directory[1].name[0..9], b"test2.txt");
@@ -2024,13 +2026,13 @@ mod tests {
         assert!(result.is_ok());
         let entries = result.unwrap();
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].inode_number, 1);
+        assert_eq!(entries[0].inode_index, 1);
         assert_eq!(entries[0].file_type, FileType::File);
         assert_eq!(entries[0].name.to_string(), "file1.txt");
-        assert_eq!(entries[1].inode_number, 2);
+        assert_eq!(entries[1].inode_index, 2);
         assert_eq!(entries[1].file_type, FileType::Directory);
         assert_eq!(entries[1].name.to_string(), "dir1");
-        assert_eq!(entries[2].inode_number, 3);
+        assert_eq!(entries[2].inode_index, 3);
         assert_eq!(entries[2].file_type, FileType::File);
         assert_eq!(entries[2].name.to_string(), "file2.txt");
 
@@ -2106,7 +2108,7 @@ mod tests {
         assert!(result.is_ok());
         let entries = result.unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].inode_number, 2);
+        assert_eq!(entries[0].inode_index, 2);
         assert_eq!(entries[0].file_type, FileType::File);
         assert_eq!(entries[0].name.to_string(), "nested_file.txt");
 
