@@ -122,6 +122,11 @@ impl BlockIndex {
         }
         Ok(BlockIndex(index))
     }
+
+    fn get_next_block(&self) -> Option<BlockIndex> {
+        let next_block_index = self.0 + 1;
+        BlockIndex::try_new(next_block_index).ok()
+    }
 }
 
 impl Deref for BlockIndex {
