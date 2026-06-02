@@ -986,12 +986,7 @@ impl<D: BlockDevice> MyFS<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BlockIndex, BytesSerializable,
-        DATA_BLOCK_START_INDEX, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error,
-        FILE_NAME_SIZE, Filename, INODE_BITMAP_BLOCK_INDEX, INODE_COUNT, INODE_SIZE,
-        INODE_TABLE_BLOCK_INDEX, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS,
-    };
+    use crate::{BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BlockIndex, BytesSerializable, DATA_BLOCK_START_INDEX, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, Filename, INODE_BITMAP_BLOCK_INDEX, INODE_COUNT, INODE_SIZE, INODE_TABLE_BLOCK_INDEX, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, BLOCK_BITMAP_BLOCK_INDEX};
     use crate::{FileType, Inode, MyFS};
     use std::fs;
     use std::io::Write;
@@ -1763,7 +1758,7 @@ mod tests {
         let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes1.len()].copy_from_slice(&dir_bytes1);
         fs.device
-            .write_block(BlockIndex::try_new(4).unwrap(), &mut buffer)
+            .write_block(BlockIndex::try_new(DATA_BLOCK_START_INDEX).unwrap(), &mut buffer)
             .unwrap();
 
         // Create second level directory entry (inode 1, block 5)
@@ -1774,7 +1769,7 @@ mod tests {
         buffer.fill(0);
         buffer[0..dir_bytes2.len()].copy_from_slice(&dir_bytes2);
         fs.device
-            .write_block(BlockIndex::try_new(5).unwrap(), &mut buffer)
+            .write_block(BlockIndex::try_new(DATA_BLOCK_START_INDEX + 1).unwrap(), &mut buffer)
             .unwrap();
 
         // Set inodes in bitmap
@@ -1783,7 +1778,7 @@ mod tests {
         buffer.fill(0);
         buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
-            .write_block(BlockIndex::try_new(1).unwrap(), &mut buffer)
+            .write_block(BlockIndex::try_new(INODE_BITMAP_BLOCK_INDEX).unwrap(), &mut buffer)
             .unwrap();
 
         // Set blocks in bitmap
@@ -1792,7 +1787,7 @@ mod tests {
         buffer.fill(0);
         buffer.copy_from_slice(&fs.block_bitmap);
         fs.device
-            .write_block(BlockIndex::try_new(2).unwrap(), &mut buffer)
+            .write_block(BlockIndex::try_new(BLOCK_BITMAP_BLOCK_INDEX).unwrap(), &mut buffer)
             .unwrap();
         buffer.fill(0);
 
