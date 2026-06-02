@@ -32,7 +32,7 @@ const BLOCK_BITMAP_BLOCK_INDEX: u32 = 2;
 /// Index of the block where the inode table begins.
 const INODE_TABLE_BLOCK_INDEX: u32 = 3;
 /// Index of the first data block in the file system.
-const DATA_BLOCK_START_INDEX: u32 = 4;
+const ROOT_DIR_BLOCK_INDEX: u32 = 4;
 
 /// Represents various errors that can occur during file system operations.
 #[derive(Debug, PartialEq)]
@@ -986,7 +986,7 @@ impl<D: BlockDevice> MyFS<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BlockIndex, BytesSerializable, DATA_BLOCK_START_INDEX, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, Filename, INODE_BITMAP_BLOCK_INDEX, INODE_COUNT, INODE_SIZE, INODE_TABLE_BLOCK_INDEX, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, BLOCK_BITMAP_BLOCK_INDEX};
+    use crate::{BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BlockIndex, BytesSerializable, ROOT_DIR_BLOCK_INDEX, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, Filename, INODE_BITMAP_BLOCK_INDEX, INODE_COUNT, INODE_SIZE, INODE_TABLE_BLOCK_INDEX, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, BLOCK_BITMAP_BLOCK_INDEX};
     use crate::{FileType, Inode, MyFS};
     use std::fs;
     use std::io::Write;
@@ -1750,7 +1750,7 @@ mod tests {
         MyFS::format(&mut disk).unwrap();
         let mut fs = MyFS::mount(disk).unwrap();
 
-        // Create first level directory entry in root (inode 0, block 4)
+        // Create first level directory entry in root (inode 1, block 4)
         let name1 = Filename::try_new("dir".to_string()).unwrap();
         let entry1 = DirectoryEntry::try_new(1, FileType::Directory, name1).unwrap();
         let directory1 = Directory(vec![entry1]);
@@ -1758,10 +1758,10 @@ mod tests {
         let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes1.len()].copy_from_slice(&dir_bytes1);
         fs.device
-            .write_block(BlockIndex::try_new(DATA_BLOCK_START_INDEX).unwrap(), &mut buffer)
+            .write_block(BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX).unwrap(), &mut buffer)
             .unwrap();
 
-        // Create second level directory entry (inode 1, block 5)
+        // Create second level directory entry (inode 2, block 5)
         let name2 = Filename::try_new("subdir".to_string()).unwrap();
         let entry2 = DirectoryEntry::try_new(2, FileType::Directory, name2).unwrap();
         let directory2 = Directory(vec![entry2]);
@@ -1769,7 +1769,7 @@ mod tests {
         buffer.fill(0);
         buffer[0..dir_bytes2.len()].copy_from_slice(&dir_bytes2);
         fs.device
-            .write_block(BlockIndex::try_new(DATA_BLOCK_START_INDEX + 1).unwrap(), &mut buffer)
+            .write_block(BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX + 1).unwrap(), &mut buffer)
             .unwrap();
 
         // Set inodes in bitmap
@@ -1855,7 +1855,7 @@ mod tests {
         buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
         fs.device
             .write_block(
-                BlockIndex::try_new(DATA_BLOCK_START_INDEX).unwrap(),
+                BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX).unwrap(),
                 &mut buffer,
             )
             .unwrap();
@@ -1971,7 +1971,7 @@ mod tests {
         buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
         fs.device
             .write_block(
-                BlockIndex::try_new(DATA_BLOCK_START_INDEX).unwrap(),
+                BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX).unwrap(),
                 &mut buffer,
             )
             .unwrap();
