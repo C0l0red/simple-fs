@@ -1752,7 +1752,7 @@ mod tests {
 
         // Create first level directory entry in root (inode 0, block 4)
         let name1 = Filename::try_new("dir".to_string()).unwrap();
-        let entry1 = DirectoryEntry::try_new(0, FileType::Directory, name1).unwrap();
+        let entry1 = DirectoryEntry::try_new(1, FileType::Directory, name1).unwrap();
         let directory1 = Directory(vec![entry1]);
         let dir_bytes1 = directory1.to_bytes();
         let mut buffer = BlockBuffer::new();
@@ -1763,7 +1763,7 @@ mod tests {
 
         // Create second level directory entry (inode 1, block 5)
         let name2 = Filename::try_new("subdir".to_string()).unwrap();
-        let entry2 = DirectoryEntry::try_new(1, FileType::Directory, name2).unwrap();
+        let entry2 = DirectoryEntry::try_new(2, FileType::Directory, name2).unwrap();
         let directory2 = Directory(vec![entry2]);
         let dir_bytes2 = directory2.to_bytes();
         buffer.fill(0);
