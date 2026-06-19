@@ -270,6 +270,10 @@ impl BlockBuffer {
     fn is_empty(&self) -> bool {
         self.0.iter().all(|&b| b == 0)
     }
+
+    fn clear(&mut self) {
+        self.0.fill(0);
+    }
 }
 
 impl Deref for BlockBuffer {
@@ -1316,7 +1320,7 @@ mod tests {
         buffer[0..4].copy_from_slice(&data);
 
         let write_result = disk.write_block(BlockIndex::try_new(2).unwrap(), &mut buffer);
-        buffer.fill(0);
+        buffer.clear();
         assert!(write_result.is_ok());
 
         disk.read_block(BlockIndex::try_new(2).unwrap(), &mut buffer)
@@ -1717,23 +1721,24 @@ mod tests {
         fs.device
             .write_block(BlockIndex::try_new(4).unwrap(), &mut block_buffer)
             .unwrap();
-        block_buffer.fill(0);
+        block_buffer.clear();
 
         // Set inode 1 in bitmap
         fs.inode_bitmap.set_bit(1);
         block_buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
-            .write_block(BlockIndex::try_new(1).unwrap(), &mut block_buffer)
+            .write_block(BlockIndex::try_new(INODE_BITMAP_BLOCK_INDEX).unwrap(), &mut block_buffer)
             .unwrap();
-        block_buffer.fill(0);
+        block_buffer.clear();
 
         // Create inode 1
+        // TODO: Give the inode a size
         let inode = Inode::new(FileType::Directory, 0, BlockIndex::try_new(5).unwrap());
         fs.inodes.insert(1, Some(inode));
         let inode_table_bytes = fs.inodes.to_bytes();
         block_buffer[0..inode_table_bytes.len()].copy_from_slice(&inode_table_bytes);
         fs.device
-            .write_block(BlockIndex::try_new(3).unwrap(), &mut block_buffer)
+            .write_block(BlockIndex::try_new(INODE_TABLE_BLOCK_INDEX).unwrap(), &mut block_buffer)
             .unwrap();
 
         // Reload filesystem
@@ -1774,7 +1779,7 @@ mod tests {
         let entry2 = DirectoryEntry::try_new(ROOT_DIR_INODE_INDEX + 2, FileType::Directory, name2).unwrap();
         let directory2 = Directory(vec![entry2]);
         let dir_bytes2 = directory2.to_bytes();
-        buffer.fill(0);
+        buffer.clear();
         buffer[0..dir_bytes2.len()].copy_from_slice(&dir_bytes2);
         fs.device
             .write_block(BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX + 1).unwrap(), &mut buffer)
@@ -1783,7 +1788,7 @@ mod tests {
         // Set inodes in bitmap. Index 1 for dir, index 2 for subdir
         fs.inode_bitmap.set_bit(1);
         fs.inode_bitmap.set_bit(2);
-        buffer.fill(0);
+        buffer.clear();
         buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
             .write_block(BlockIndex::try_new(INODE_BITMAP_BLOCK_INDEX).unwrap(), &mut buffer)
@@ -1793,12 +1798,12 @@ mod tests {
         //FIXME: The blocks do not change anything, meaning they don't get used in the function
         fs.block_bitmap.set_bit(5);
         fs.block_bitmap.set_bit(6);
-        buffer.fill(0);
+        buffer.clear();
         buffer.copy_from_slice(&fs.block_bitmap);
         fs.device
             .write_block(BlockIndex::try_new(BLOCK_BITMAP_BLOCK_INDEX).unwrap(), &mut buffer)
             .unwrap();
-        buffer.fill(0);
+        buffer.clear();
 
         // Create inodes
         let inode1 = Inode::new(FileType::Directory, 0, BlockIndex::try_new(5).unwrap());
@@ -1868,7 +1873,7 @@ mod tests {
                 &mut buffer,
             )
             .unwrap();
-        buffer.fill(0);
+        buffer.clear();
 
         // Set inode 1 in bitmap
         fs.inode_bitmap.set_bit(1);
@@ -1879,7 +1884,7 @@ mod tests {
                 &mut buffer,
             )
             .unwrap();
-        buffer.fill(0);
+        buffer.clear();
 
         // Create inode 1
         let inode = Inode::new(FileType::Directory, 0, BlockIndex::try_new(5).unwrap());
@@ -1892,7 +1897,7 @@ mod tests {
                 &mut buffer,
             )
             .unwrap();
-        buffer.fill(0);
+        buffer.clear();
 
         // Reload filesystem
         let disk = ImgFileDisk::open(path).unwrap();
@@ -1934,12 +1939,12 @@ mod tests {
 
         // Set inode 1 in bitmap
         fs.inode_bitmap.set_bit(1);
-        buffer.fill(0);
+        buffer.clear();
         buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
             .write_block(BlockIndex::try_new(1).unwrap(), &mut buffer)
             .unwrap();
-        buffer.fill(0);
+        buffer.clear();
 
         // Create inode 1
         let inode = Inode::new(FileType::Directory, 0, BlockIndex::try_new(5).unwrap());
@@ -2076,7 +2081,7 @@ mod tests {
         let entry2 = DirectoryEntry::try_new(2, FileType::File, name2).unwrap();
         let sub_directory = Directory(vec![entry2]);
         let sub_dir_bytes = sub_directory.to_bytes();
-        buffer.fill(0);
+        buffer.clear();
         buffer[0..sub_dir_bytes.len()].copy_from_slice(&sub_dir_bytes);
         fs.device
             .write_block(BlockIndex::try_new(5).unwrap(), &mut buffer)
@@ -2085,7 +2090,7 @@ mod tests {
         // Set inodes in bitmap
         fs.inode_bitmap.set_bit(1);
         fs.inode_bitmap.set_bit(2);
-        buffer.fill(0);
+        buffer.clear();
         buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
             .write_block(BlockIndex::try_new(1).unwrap(), &mut buffer)
@@ -2093,7 +2098,7 @@ mod tests {
 
         // Set blocks in bitmap
         fs.block_bitmap.set_bit(5);
-        buffer.fill(0);
+        buffer.clear();
         buffer.copy_from_slice(&fs.block_bitmap);
         fs.device
             .write_block(BlockIndex::try_new(2).unwrap(), &mut buffer)
@@ -2105,7 +2110,7 @@ mod tests {
         fs.inodes.insert(1, Some(inode1));
         fs.inodes.insert(2, Some(inode2));
         let inode_table_bytes = fs.inodes.to_bytes();
-        buffer.fill(0);
+        buffer.clear();
         buffer[0..inode_table_bytes.len()].copy_from_slice(&inode_table_bytes);
         fs.device
             .write_block(BlockIndex::try_new(3).unwrap(), &mut buffer)
@@ -2190,7 +2195,7 @@ mod tests {
 
         // Set inode in bitmap
         fs.inode_bitmap.set_bit(1);
-        buffer.fill(0);
+        buffer.clear();
         buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
             .write_block(BlockIndex::try_new(1).unwrap(), &mut buffer)
@@ -2200,7 +2205,7 @@ mod tests {
         let inode = Inode::new(FileType::File, 0, BlockIndex::try_new(5).unwrap());
         fs.inodes.insert(1, Some(inode));
         let inode_table_bytes = fs.inodes.to_bytes();
-        buffer.fill(0);
+        buffer.clear();
         buffer[0..inode_table_bytes.len()].copy_from_slice(&inode_table_bytes);
         fs.device
             .write_block(BlockIndex::try_new(3).unwrap(), &mut buffer)
@@ -2243,7 +2248,7 @@ mod tests {
 
         // Set inode in bitmap
         fs.inode_bitmap.set_bit(1);
-        buffer.fill(0);
+        buffer.clear();
         buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
             .write_block(BlockIndex::try_new(1).unwrap(), &mut buffer)
