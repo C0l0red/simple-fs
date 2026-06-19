@@ -33,6 +33,7 @@ const BLOCK_BITMAP_BLOCK_INDEX: u32 = 2;
 const INODE_TABLE_BLOCK_INDEX: u32 = 3;
 /// Index of the first data block in the file system.
 const ROOT_DIR_BLOCK_INDEX: u32 = 4;
+const ROOT_DIR_INODE_INDEX: u32 = 0;
 
 /// Represents various errors that can occur during file system operations.
 #[derive(Debug, PartialEq)]
@@ -908,11 +909,11 @@ impl<D: BlockDevice> MyFS<D> {
             .collect::<Vec<&str>>();
         let mut buffer = BlockBuffer::new();
         // Start at the first data block (root directory block)
-        let mut inode_number = 0;
+        let mut inode_index = ROOT_DIR_INODE_INDEX;
         let mut current_dir_name = "~";
 
         'components: for component in path_components {
-            let inode = &self.inodes[inode_number as usize].ok_or_else(|| {
+            let inode = &self.inodes[inode_index as usize].ok_or_else(|| {
                 Error::Validation(format!("Inode for {} does not exist", current_dir_name))
             })?;
             if inode.file_type != FileType::Directory {
@@ -922,6 +923,13 @@ impl<D: BlockDevice> MyFS<D> {
             }
 
             let block_index = inode.direct_block;
+            let is_block_bitmap_set = self.block_bitmap.is_bit_set(*block_index as usize);
+            if !is_block_bitmap_set {
+                return Err(Error::Validation(format!(
+                    "Block for inode {} is not allocated", inode_index
+                )))
+            }
+
             self.device.read_block(block_index, &mut buffer)?;
             if buffer.is_empty() {
                 return Err(Error::EntryNotFound {
@@ -936,8 +944,8 @@ impl<D: BlockDevice> MyFS<D> {
                     &buffer[buffer_cursor..buffer_cursor + DIRECTORY_ENTRY_SIZE as usize],
                 )?;
                 if entry.name.to_string() == component {
-                    inode_number = entry.inode_index;
-                    let inode_exists = self.inode_bitmap.is_bit_set(inode_number as usize);
+                    inode_index = entry.inode_index;
+                    let inode_exists = self.inode_bitmap.is_bit_set(inode_index as usize);
                     if !inode_exists {
                         return Err(Error::Validation(format!(
                             "Inode for {} is empty",
@@ -956,7 +964,7 @@ impl<D: BlockDevice> MyFS<D> {
             });
         }
 
-        Ok(inode_number)
+        Ok(inode_index)
     }
 
     /// Retrieves all directory entries for a given absolute path.
@@ -986,7 +994,7 @@ impl<D: BlockDevice> MyFS<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BlockIndex, BytesSerializable, ROOT_DIR_BLOCK_INDEX, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, Filename, INODE_BITMAP_BLOCK_INDEX, INODE_COUNT, INODE_SIZE, INODE_TABLE_BLOCK_INDEX, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, BLOCK_BITMAP_BLOCK_INDEX};
+    use crate::{BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BlockIndex, BytesSerializable, ROOT_DIR_BLOCK_INDEX, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, Filename, INODE_BITMAP_BLOCK_INDEX, INODE_COUNT, INODE_SIZE, INODE_TABLE_BLOCK_INDEX, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, BLOCK_BITMAP_BLOCK_INDEX, ROOT_DIR_INODE_INDEX};
     use crate::{FileType, Inode, MyFS};
     use std::fs;
     use std::io::Write;
@@ -1752,7 +1760,7 @@ mod tests {
 
         // Create first level directory entry in root (inode 1, block 4)
         let name1 = Filename::try_new("dir".to_string()).unwrap();
-        let entry1 = DirectoryEntry::try_new(1, FileType::Directory, name1).unwrap();
+        let entry1 = DirectoryEntry::try_new(ROOT_DIR_INODE_INDEX + 1, FileType::Directory, name1).unwrap();
         let directory1 = Directory(vec![entry1]);
         let dir_bytes1 = directory1.to_bytes();
         let mut buffer = BlockBuffer::new();
@@ -1763,7 +1771,7 @@ mod tests {
 
         // Create second level directory entry (inode 2, block 5)
         let name2 = Filename::try_new("subdir".to_string()).unwrap();
-        let entry2 = DirectoryEntry::try_new(2, FileType::Directory, name2).unwrap();
+        let entry2 = DirectoryEntry::try_new(ROOT_DIR_INODE_INDEX + 2, FileType::Directory, name2).unwrap();
         let directory2 = Directory(vec![entry2]);
         let dir_bytes2 = directory2.to_bytes();
         buffer.fill(0);
@@ -1772,7 +1780,7 @@ mod tests {
             .write_block(BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX + 1).unwrap(), &mut buffer)
             .unwrap();
 
-        // Set inodes in bitmap
+        // Set inodes in bitmap. Index 1 for dir, index 2 for subdir
         fs.inode_bitmap.set_bit(1);
         fs.inode_bitmap.set_bit(2);
         buffer.fill(0);
@@ -1781,7 +1789,8 @@ mod tests {
             .write_block(BlockIndex::try_new(INODE_BITMAP_BLOCK_INDEX).unwrap(), &mut buffer)
             .unwrap();
 
-        // Set blocks in bitmap
+        // Set blocks in bitmap. Block 4 for dir, block 5 for subdir
+        //FIXME: The blocks do not change anything, meaning they don't get used in the function
         fs.block_bitmap.set_bit(5);
         fs.block_bitmap.set_bit(6);
         buffer.fill(0);
