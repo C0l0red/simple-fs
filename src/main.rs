@@ -20,9 +20,9 @@ const INODE_SIZE: u32 = 9;
 /// Size of a single disk block in bytes.
 const BLOCK_SIZE: u32 = 4096;
 /// Total number of blocks available on the disk.
-const TOTAL_BLOCKS: u32 = 16;
-/// Maximum number of bytes allowed for a file name.
-const FILE_NAME_SIZE: u32 = 250;
+const BLOCK_COUNT: u32 = 16;
+/// Maximum number of bytes allowed for an entry name (not the number of characters).
+const DIRECTORY_ENTRY_NAME_SIZE: u32 = 250;
 /// Total size of a directory entry in bytes.
 const DIRECTORY_ENTRY_SIZE: u32 = 256;
 /// Index of the block containing the inode allocation bitmap.
@@ -93,8 +93,8 @@ trait BlockDevice {
     /// Returns the total number of blocks available on the device.
     ///
     /// # Returns
-    /// * The total block count as a `usize`.
-    fn total_blocks(&self) -> usize;
+    /// * The total block count as a `u32`.
+    fn block_count(&self) -> u32;
 }
 
 /// A fixed-size buffer used for block I/O operations.
@@ -104,7 +104,9 @@ struct BlockBuffer([u8; BLOCK_SIZE as usize]);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct BlockIndex(u32);
 
-struct InodeIndex(u8);
+/// A new-type wrapper for an inode index, ensuring it is within valid bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct InodeIndex(u32);
 
 impl BlockIndex {
     /// Creates a new `BlockIndex` after validating it against the total number of blocks.
@@ -115,10 +117,10 @@ impl BlockIndex {
     /// # Returns
     /// * `Ok(BlockIndex)` if the index is valid, or `Error::Validation` if it's out of bounds.
     fn try_new(index: u32) -> Result<Self, Error> {
-        if index >= TOTAL_BLOCKS {
+        if index >= BLOCK_COUNT {
             return Err(Error::Validation(format!(
                 "Block index {} is out of bounds (total blocks: {})",
-                index, TOTAL_BLOCKS
+                index, BLOCK_COUNT
             )));
         }
         Ok(BlockIndex(index))
@@ -137,6 +139,38 @@ impl Deref for BlockIndex {
     }
 }
 
+impl InodeIndex {
+    fn try_new(index: u32) -> Result<Self, Error> {
+        if index >= INODE_COUNT {
+            return Err(Error::ParseFailed(format!(
+                "inode index {} is out of range (total inodes: {})",
+                index, INODE_COUNT
+            )));
+        }
+        Ok(InodeIndex(index))
+    }
+}
+
+impl TryFrom<&[u8]> for InodeIndex {
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        if bytes.len() != 4 {
+            return Err(Error::ParseFailed(
+                "invalid length for inode index".to_string(),
+            ));
+        }
+        Ok(InodeIndex(bytes_to_u32(&bytes)?))
+    }
+}
+
+impl Deref for InodeIndex {
+    type Target = u32;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// A block device implementation that uses a file on the host system as storage.
 struct ImgFileDisk {
     /// The underlying file used for storage.
@@ -144,7 +178,7 @@ struct ImgFileDisk {
     /// The size of each block in bytes.
     block_size: u32,
     /// The total number of blocks in the disk image.
-    total_blocks: u32,
+    block_count: u32,
 }
 
 /// The core structure representing the MyFS file system instance.
@@ -213,35 +247,35 @@ enum NodeType {
 }
 
 /// A fixed-size structure for storing file and directory names.
-struct Filename([u8; FILE_NAME_SIZE as usize]);
+struct EntryName([u8; DIRECTORY_ENTRY_NAME_SIZE as usize]);
 
 /// Represents a single entry within a directory.
 struct DirectoryEntry {
-    /// The inode number associated with this entry.
-    inode_index: u32,
+    /// The inode index associated with this entry.
+    inode_index: InodeIndex,
     /// The type of the file system entry.
     node_type: NodeType,
     /// Length of the actual name within the fixed-size buffer.
     name_length: u8,
     /// The name of the entry.
-    name: Filename,
+    name: EntryName,
 }
 
 impl DirectoryEntry {
     /// Creates a new directory entry
     ///
     /// # Arguments
-    /// * `inode_number`: The index of the inode the directory entry belongs to.
+    /// * `inode_index`: The index of the inode the directory entry belongs to.
     /// * `node_type`: The type of file the directory entry is.
     /// * `name`: The name of the entry, represented as a fixed-size byte array.
     ///
     /// # Returns
     /// * `Result<Self, Error>`: A new `DirectoryEntry` instance or an error if the name length conversion fails.
-    fn try_new(inode_index: u32, node_type: NodeType, name: Filename) -> Result<Self, Error> {
-        if inode_index >= INODE_COUNT {
-            return Err(Error::ParseFailed("inode index out of range".to_string()));
-        }
-
+    fn try_new(
+        inode_index: InodeIndex,
+        node_type: NodeType,
+        name: EntryName,
+    ) -> Result<Self, Error> {
         let name_length = u8::try_from(name.len()).map_err(|_| {
             Error::ParseFailed("usize to u8 conversion failed for directory entry".to_string())
         })?;
@@ -412,9 +446,13 @@ impl Inode {
 impl InodeTable {
     fn get_inode(&self, inode_index: u32) -> Result<&Inode, Error> {
         self.get(inode_index as usize)
-            .ok_or_else(|| Error::Validation(format!("Inode index {} is out of bounds", inode_index)))?
+            .ok_or_else(|| {
+                Error::Validation(format!("Inode index {} is out of bounds", inode_index))
+            })?
             .as_ref()
-            .ok_or_else(|| Error::Validation(format!("Inode for index {} does not exist", inode_index)))
+            .ok_or_else(|| {
+                Error::Validation(format!("Inode for index {} does not exist", inode_index))
+            })
     }
 }
 
@@ -438,28 +476,28 @@ impl Deref for Directory {
     }
 }
 
-impl Filename {
-    // /// Attempts to create a new `Filename` from a string.
+impl EntryName {
+    // /// Attempts to create a new `EntryName` from a string.
     // ///
-    // /// Fails if the string exceeds the maximum allowed filename size.
+    // /// Fails if the string exceeds the maximum allowed entry name size.
     // ///
     // /// # Arguments
-    // /// * `name`: The string to convert into a `Filename`.
+    // /// * `name`: The string to convert into an `EntryName`.
     // ///
     // /// # Returns
-    // /// * `Ok(Filename)` if valid, or `Error::Validation` if too long.
-    // fn try_new(bytes: [u8; FILE_NAME_SIZE as usize], len: usize) -> Result<Self, Error> {
+    // /// * `Ok(EntryName)` if valid, or `Error::Validation` if too long.
+    // fn try_new(bytes: [u8; ENTRY_NAME_SIZE as usize], len: usize) -> Result<Self, Error> {
     //
-    //     if name.len() > FILE_NAME_SIZE as usize {
-    //         return Err(Error::Validation("Filename is too long".to_string()));
+    //     if name.len() > ENTRY_NAME_SIZE as usize {
+    //         return Err(Error::Validation("EntryName is too long".to_string()));
     //     }
-    //     let mut bytes = [0u8; FILE_NAME_SIZE as usize];
+    //     let mut bytes = [0u8; ENTRY_NAME_SIZE as usize];
     //     bytes[..name.len()].copy_from_slice(name.as_bytes());
     //
     //     Ok(Self(bytes))
     // }
 
-    /// Calculates the actual length of the filename string.
+    /// Calculates the actual length of the entry name string.
     ///
     /// This finds the first null byte in the fixed-size buffer.
     ///
@@ -470,20 +508,20 @@ impl Filename {
     }
 }
 
-impl Deref for Filename {
-    type Target = [u8; FILE_NAME_SIZE as usize];
+impl Deref for EntryName {
+    type Target = [u8; DIRECTORY_ENTRY_NAME_SIZE as usize];
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for Filename {
+impl DerefMut for EntryName {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl Display for Filename {
+impl Display for EntryName {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let copy = self.to_vec();
         let end = copy.iter().position(|&b| b == 0).unwrap_or(copy.len());
@@ -491,26 +529,41 @@ impl Display for Filename {
     }
 }
 
-impl TryFrom<&str> for Filename {
+impl TryFrom<&str> for EntryName {
     type Error = Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        if value.len() > FILE_NAME_SIZE as usize {
-            return Err(Error::Validation("Filename is too long".to_string()));
+        if value.as_bytes().len() > DIRECTORY_ENTRY_NAME_SIZE as usize {
+            return Err(Error::Validation(format!(
+                "Entry name is over {DIRECTORY_ENTRY_NAME_SIZE} bytes"
+            )));
         }
-        let mut bytes = [0u8; FILE_NAME_SIZE as usize];
+        let mut bytes = [0u8; DIRECTORY_ENTRY_NAME_SIZE as usize];
         bytes[..value.len()].copy_from_slice(value.as_bytes());
 
         Ok(Self(bytes))
     }
 }
 
-impl TryFrom<String> for Filename {
+impl TryFrom<String> for EntryName {
     type Error = Error;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::try_from(value.as_str())
     }
+}
+
+/// Helper function to convert a 4-byte slice into a `u32` (little-endian).
+///
+/// # Arguments
+/// * `bytes`: A byte slice of length 4.
+///
+/// # Returns
+/// * `Ok(u32)` on success, or `Error::Validation` if the slice is invalid.
+fn bytes_to_u32(bytes: &[u8]) -> Result<u32, Error> {
+    Ok(u32::from_le_bytes(bytes.try_into().map_err(|_| {
+        Error::Validation("Bytes to u32 conversion failed".to_string())
+    })?))
 }
 
 /// A trait for serializing and deserializing objects to and from byte representations.
@@ -546,19 +599,6 @@ impl TryFrom<String> for Filename {
 /// ```
 /// Defines methods for serializing and deserializing file system structures to/from byte buffers.
 trait BytesSerializable {
-    /// Helper method to convert a 4-byte slice into a `u32` (little-endian).
-    ///
-    /// # Arguments
-    /// * `bytes`: A byte slice of length 4.
-    ///
-    /// # Returns
-    /// * `Ok(u32)` on success, or `Error::Validation` if the slice is invalid.
-    fn bytes_to_u32(bytes: &[u8]) -> Result<u32, Error> {
-        Ok(u32::from_le_bytes(bytes.try_into().map_err(|_| {
-            Error::Validation("Bytes to u32 conversion failed".to_string())
-        })?))
-    }
-
     /// Serializes the structure into a vector of bytes.
     ///
     /// # Returns
@@ -597,8 +637,8 @@ impl BytesSerializable for Inode {
 
         Ok(Inode {
             node_type: NodeType::try_from(buffer[0])?,
-            node_size: Self::bytes_to_u32(&buffer[1..5])?,
-            direct_block: BlockIndex::try_new(Self::bytes_to_u32(&buffer[5..9])?)?,
+            node_size: bytes_to_u32(&buffer[1..5])?,
+            direct_block: BlockIndex::try_new(bytes_to_u32(&buffer[5..9])?)?,
         })
     }
 }
@@ -660,16 +700,16 @@ impl BytesSerializable for Superblock {
         }
 
         Ok(Superblock {
-            magic_number: Self::bytes_to_u32(&bytes[0..4])?,
-            version: Self::bytes_to_u32(&bytes[4..8])?,
-            block_size: Self::bytes_to_u32(&bytes[8..12])?,
-            total_blocks: Self::bytes_to_u32(&bytes[12..16])?,
-            inode_count: Self::bytes_to_u32(&bytes[16..20])?,
-            inode_size: Self::bytes_to_u32(&bytes[20..24])?,
-            inode_bitmap_start: BlockIndex::try_new(Self::bytes_to_u32(&bytes[24..28])?)?,
-            block_bitmap_start: BlockIndex::try_new(Self::bytes_to_u32(&bytes[28..32])?)?,
-            inode_table_start: BlockIndex::try_new(Self::bytes_to_u32(&bytes[32..36])?)?,
-            data_block_start: BlockIndex::try_new(Self::bytes_to_u32(&bytes[36..40])?)?,
+            magic_number: bytes_to_u32(&bytes[0..4])?,
+            version: bytes_to_u32(&bytes[4..8])?,
+            block_size: bytes_to_u32(&bytes[8..12])?,
+            total_blocks: bytes_to_u32(&bytes[12..16])?,
+            inode_count: bytes_to_u32(&bytes[16..20])?,
+            inode_size: bytes_to_u32(&bytes[20..24])?,
+            inode_bitmap_start: BlockIndex::try_new(bytes_to_u32(&bytes[24..28])?)?,
+            block_bitmap_start: BlockIndex::try_new(bytes_to_u32(&bytes[28..32])?)?,
+            inode_table_start: BlockIndex::try_new(bytes_to_u32(&bytes[32..36])?)?,
+            data_block_start: BlockIndex::try_new(bytes_to_u32(&bytes[36..40])?)?,
         })
     }
 }
@@ -696,21 +736,25 @@ impl BytesSerializable for DirectoryEntry {
             ));
         }
 
-        if bytes[0..DIRECTORY_ENTRY_SIZE as usize].iter().all(|&byte| byte == 0) {
+        if bytes[0..DIRECTORY_ENTRY_SIZE as usize]
+            .iter()
+            .all(|&byte| byte == 0)
+        {
             return Err(Error::ParseFailed("Invalid DirectoryEntry".into()));
         }
 
-        if bytes[5] > FILE_NAME_SIZE as u8 {
+        if bytes[5] > DIRECTORY_ENTRY_NAME_SIZE as u8 {
             return Err(Error::Validation("Invalid name length".into()));
         }
 
-        let name: [u8; FILE_NAME_SIZE as usize] = bytes[6..DIRECTORY_ENTRY_SIZE as usize]
+        let name: [u8; DIRECTORY_ENTRY_NAME_SIZE as usize] = bytes
+            [6..DIRECTORY_ENTRY_SIZE as usize]
             .try_into()
             .map_err(|_| Error::Validation("Invalid name length".into()))?;
-        let name = Filename(name);
+        let name = EntryName(name);
 
         Ok(Self {
-            inode_index: Self::bytes_to_u32(&bytes[0..4])?,
+            inode_index: InodeIndex::try_from(&bytes[0..4])?,
             node_type: NodeType::try_from(bytes[4])?,
             name_length: bytes[5],
             name,
@@ -730,7 +774,7 @@ impl BytesSerializable for Directory {
             buffer[start_index..start_index + 4].copy_from_slice(&entry.inode_index.to_le_bytes());
             buffer[start_index + 4] = entry.node_type as u8;
             buffer[start_index + 5] = entry.name_length;
-            buffer[start_index + 6..start_index + 6 + FILE_NAME_SIZE as usize]
+            buffer[start_index + 6..start_index + 6 + DIRECTORY_ENTRY_NAME_SIZE as usize]
                 .copy_from_slice(&entry.name.0);
         }
 
@@ -755,11 +799,10 @@ impl BytesSerializable for Directory {
             let entry = match DirectoryEntry::try_from_bytes(entry_bytes) {
                 Ok(entry) => entry,
                 Err(Error::ParseFailed(_)) => continue, // Skip if the entry is empty
-                Err(err) => return Err(err)
+                Err(err) => return Err(err),
             };
 
             entries.push(entry);
-
 
             cursor += DIRECTORY_ENTRY_SIZE as usize;
         }
@@ -798,7 +841,7 @@ impl ImgFileDisk {
                 .open(path)
                 .map_err(|_| Error::IO("Could not open disk file".to_string()))?,
             block_size: BLOCK_SIZE,
-            total_blocks: TOTAL_BLOCKS,
+            block_count: BLOCK_COUNT,
         })
     }
 }
@@ -840,8 +883,8 @@ impl BlockDevice for ImgFileDisk {
         self.block_size as usize
     }
 
-    fn total_blocks(&self) -> usize {
-        self.total_blocks as usize
+    fn block_count(&self) -> u32 {
+        self.block_count
     }
 }
 
@@ -899,10 +942,10 @@ impl<D: BlockDevice> MyFS<D> {
     /// * `Ok(())` on success, or `Error` if formatting fails.
     fn format(device: &mut D) -> Result<(), Error> {
         // Replace all blocks with zeros
-        let total_blocks = device.total_blocks();
+        let total_blocks = device.block_count();
         let mut buffer = BlockBuffer::new();
         for block_index in 0..total_blocks {
-            device.write_block(BlockIndex::try_new(block_index as u32)?, &mut buffer)?;
+            device.write_block(BlockIndex::try_new(block_index)?, &mut buffer)?;
         }
 
         // let mut buffer = vec![0u8; device.block_size() as usize];
@@ -912,13 +955,13 @@ impl<D: BlockDevice> MyFS<D> {
             magic_number: MAGIC_NUMBER,
             version: 1,
             block_size: device.block_size() as u32,
-            total_blocks: TOTAL_BLOCKS,
+            total_blocks: device.block_count(),
             inode_count: INODE_COUNT,
             inode_size: INODE_SIZE,
-            inode_bitmap_start: BlockIndex::try_new(1)?,
-            block_bitmap_start: BlockIndex::try_new(2)?,
-            inode_table_start: BlockIndex::try_new(3)?,
-            data_block_start: BlockIndex::try_new(4)?,
+            inode_bitmap_start: BlockIndex::try_new(INODE_BITMAP_BLOCK_INDEX)?,
+            block_bitmap_start: BlockIndex::try_new(BLOCK_BITMAP_BLOCK_INDEX)?,
+            inode_table_start: BlockIndex::try_new(INODE_TABLE_BLOCK_INDEX)?,
+            data_block_start: BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX)?,
         };
         buffer.copy_from_slice(super_block.to_bytes().as_slice());
         device.write_block(BlockIndex::try_new(0)?, &mut buffer)?;
@@ -953,18 +996,18 @@ impl<D: BlockDevice> MyFS<D> {
     ///
     /// # Returns
     /// * `Ok(u32)` containing the inode number, or `Error` if the path is invalid or an entry is missing.
-    fn resolve_path(&mut self, path: &str) -> Result<u32, Error> {
+    fn resolve_path(&mut self, path: &str) -> Result<InodeIndex, Error> {
         let path_components = path
             .split('/')
             .filter(|&c| !c.is_empty())
             .collect::<Vec<&str>>();
         let mut buffer = BlockBuffer::new();
         // Start at the first data block (root directory block)
-        let mut inode_index = ROOT_DIR_INODE_INDEX;
+        let mut inode_index = InodeIndex(ROOT_DIR_INODE_INDEX);
         let mut current_dir_name = "~";
 
         'components: for component in path_components {
-            let inode = self.inodes.get_inode(inode_index)?;
+            let inode = self.inodes.get_inode(*inode_index)?;
             if inode.node_type != NodeType::Directory {
                 return Err(Error::Validation(format!(
                     "Path component {current_dir_name} is not a directory",
@@ -975,8 +1018,9 @@ impl<D: BlockDevice> MyFS<D> {
             let is_block_bitmap_set = self.block_bitmap.is_bit_set(*block_index as usize);
             if !is_block_bitmap_set {
                 return Err(Error::Validation(format!(
-                    "Block for inode {} is not allocated", inode_index
-                )))
+                    "Block for inode {} is not allocated",
+                    *inode_index
+                )));
             }
 
             self.device.read_block(block_index, &mut buffer)?;
@@ -994,7 +1038,7 @@ impl<D: BlockDevice> MyFS<D> {
                 )?;
                 if entry.name.to_string() == component {
                     inode_index = entry.inode_index;
-                    let inode_exists = self.inode_bitmap.is_bit_set(inode_index as usize);
+                    let inode_exists = self.inode_bitmap.is_bit_set(*inode_index as usize);
                     if !inode_exists {
                         return Err(Error::Validation(format!(
                             "Inode for {} is not allocated",
@@ -1024,8 +1068,8 @@ impl<D: BlockDevice> MyFS<D> {
     /// # Returns
     /// * `Ok(Vec<DirectoryEntry>)` on success, or `Error` if the path is not a directory or doesn't exist.
     fn list_directory_entries(&mut self, path: &str) -> Result<Vec<DirectoryEntry>, Error> {
-        let inode_number = self.resolve_path(path)?;
-        let inode = &self.inodes[inode_number as usize].ok_or_else(|| {
+        let inode_index = self.resolve_path(path)?;
+        let inode = &self.inodes[*inode_index as usize].ok_or_else(|| {
             Error::NotFound("Inode for entry missing from inode table".to_string())
         })?;
         if inode.node_type != NodeType::Directory {
@@ -1043,8 +1087,14 @@ impl<D: BlockDevice> MyFS<D> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice, BlockIndex, BytesSerializable, ROOT_DIR_BLOCK_INDEX, DIRECTORY_ENTRY_SIZE, Directory, DirectoryEntry, Error, FILE_NAME_SIZE, Filename, INODE_BITMAP_BLOCK_INDEX, INODE_COUNT, INODE_SIZE, INODE_TABLE_BLOCK_INDEX, ImgFileDisk, MAGIC_NUMBER, Superblock, TOTAL_BLOCKS, BLOCK_BITMAP_BLOCK_INDEX, ROOT_DIR_INODE_INDEX};
-    use crate::{NodeType, Inode, MyFS};
+    use crate::{
+        BLOCK_BITMAP_BLOCK_INDEX, BLOCK_COUNT, BLOCK_SIZE, Bitmap, BlockBuffer, BlockDevice,
+        BlockIndex, BytesSerializable, DIRECTORY_ENTRY_NAME_SIZE, DIRECTORY_ENTRY_SIZE, Directory,
+        DirectoryEntry, EntryName, Error, INODE_BITMAP_BLOCK_INDEX, INODE_COUNT, INODE_SIZE,
+        INODE_TABLE_BLOCK_INDEX, ImgFileDisk, InodeIndex, MAGIC_NUMBER, ROOT_DIR_BLOCK_INDEX,
+        ROOT_DIR_INODE_INDEX, Superblock,
+    };
+    use crate::{Inode, MyFS, NodeType};
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -1055,7 +1105,7 @@ mod tests {
         let superblock = Superblock {
             magic_number: MAGIC_NUMBER,
             version: 1,
-            block_size: BLOCK_SIZE as u32,
+            block_size: BLOCK_SIZE,
             total_blocks: 16,
             inode_count: 8,
             inode_size: 9,
@@ -1070,32 +1120,23 @@ mod tests {
         assert_eq!(buffer.len(), BLOCK_SIZE as usize);
         assert_eq!(buffer[0..4], MAGIC_NUMBER.to_le_bytes());
         assert_eq!(buffer[4..8], superblock.version.to_le_bytes());
-        assert_eq!(buffer[8..12], (superblock.block_size as u32).to_le_bytes());
-        assert_eq!(
-            buffer[12..16],
-            (superblock.total_blocks as u32).to_le_bytes()
-        );
-        assert_eq!(
-            buffer[16..20],
-            (superblock.inode_count as u32).to_le_bytes()
-        );
-        assert_eq!(buffer[20..24], (superblock.inode_size as u32).to_le_bytes());
+        assert_eq!(buffer[8..12], superblock.block_size.to_le_bytes());
+        assert_eq!(buffer[12..16], superblock.total_blocks.to_le_bytes());
+        assert_eq!(buffer[16..20], superblock.inode_count.to_le_bytes());
+        assert_eq!(buffer[20..24], superblock.inode_size.to_le_bytes());
         assert_eq!(
             buffer[24..28],
-            (*superblock.inode_bitmap_start as u32).to_le_bytes()
+            (*superblock.inode_bitmap_start).to_le_bytes()
         );
         assert_eq!(
             buffer[28..32],
-            (*superblock.block_bitmap_start as u32).to_le_bytes()
+            (*superblock.block_bitmap_start).to_le_bytes()
         );
         assert_eq!(
             buffer[32..36],
-            (*superblock.inode_table_start as u32).to_le_bytes()
+            (*superblock.inode_table_start).to_le_bytes()
         );
-        assert_eq!(
-            buffer[36..40],
-            (*superblock.data_block_start as u32).to_le_bytes()
-        );
+        assert_eq!(buffer[36..40], (*superblock.data_block_start).to_le_bytes());
     }
 
     /// Verifies that a `Superblock` can be correctly deserialized from a byte slice.
@@ -1117,14 +1158,14 @@ mod tests {
 
         buffer[0..4].copy_from_slice(&superblock.magic_number.to_le_bytes());
         buffer[4..8].copy_from_slice(&superblock.version.to_le_bytes());
-        buffer[8..12].copy_from_slice(&(superblock.block_size as u32).to_le_bytes());
-        buffer[12..16].copy_from_slice(&(superblock.total_blocks as u32).to_le_bytes());
-        buffer[16..20].copy_from_slice(&(superblock.inode_count as u32).to_le_bytes());
-        buffer[20..24].copy_from_slice(&(superblock.inode_size as u32).to_le_bytes());
-        buffer[24..28].copy_from_slice(&(*superblock.inode_bitmap_start as u32).to_le_bytes());
-        buffer[28..32].copy_from_slice(&(*superblock.block_bitmap_start as u32).to_le_bytes());
-        buffer[32..36].copy_from_slice(&(*superblock.inode_table_start as u32).to_le_bytes());
-        buffer[36..40].copy_from_slice(&(*superblock.data_block_start as u32).to_le_bytes());
+        buffer[8..12].copy_from_slice(&superblock.block_size.to_le_bytes());
+        buffer[12..16].copy_from_slice(&superblock.total_blocks.to_le_bytes());
+        buffer[16..20].copy_from_slice(&superblock.inode_count.to_le_bytes());
+        buffer[20..24].copy_from_slice(&superblock.inode_size.to_le_bytes());
+        buffer[24..28].copy_from_slice(&(*superblock.inode_bitmap_start).to_le_bytes());
+        buffer[28..32].copy_from_slice(&(*superblock.block_bitmap_start).to_le_bytes());
+        buffer[32..36].copy_from_slice(&(*superblock.inode_table_start).to_le_bytes());
+        buffer[36..40].copy_from_slice(&(*superblock.data_block_start).to_le_bytes());
 
         let superblock_from_buffer = Superblock::try_from_bytes(&buffer).unwrap();
 
@@ -1160,29 +1201,30 @@ mod tests {
         assert_eq!(bitmap[1], 0b0000);
     }
 
-    /// Verifies that a `Filename` correctly converts its internal byte buffer to a string representation.
+    /// Verifies that a `EntryName` correctly converts its internal byte buffer to a string representation.
     #[test]
-    fn print_filename_to_string() {
-        let mut bytes = [0u8; FILE_NAME_SIZE as usize];
+    fn print_entry_name_to_string() {
+        let mut bytes = [0u8; DIRECTORY_ENTRY_NAME_SIZE as usize];
         bytes[0..8].copy_from_slice(b"test.txt");
 
-        let filename = Filename(bytes);
+        let entry_name = EntryName(bytes);
 
-        assert_eq!(filename.to_string(), "test.txt");
+        assert_eq!(entry_name.to_string(), "test.txt");
     }
 
-    /// Verifies that a new `Filename` can be successfully created from a valid string.
+    /// Verifies that a new `EntryName` can be successfully created from a valid string.
     #[test]
-    fn try_new_filename() {
-        let filename = Filename::try_from("test.txt".to_string()).unwrap();
-        assert_eq!(filename[0..8].to_vec(), b"test.txt");
+    fn try_new_entry_name() {
+        let entry_name = EntryName::try_from("test.txt".to_string()).unwrap();
+        assert_eq!(entry_name[0..8].to_vec(), b"test.txt");
     }
 
     /// Verifies that a `DirectoryEntry` can be correctly serialized into a byte vector.
     #[test]
     fn serialize_directory_entry_to_bytes() {
-        let name = Filename::try_from("test.txt".to_string()).unwrap();
-        let entry = DirectoryEntry::try_new(42, NodeType::File, name).unwrap();
+        let name = EntryName::try_from("test.txt".to_string()).unwrap();
+        let entry = DirectoryEntry::try_new(InodeIndex::try_new(42).unwrap(), NodeType::File, name)
+            .unwrap();
 
         let entry_bytes = entry.to_bytes();
 
@@ -1204,7 +1246,7 @@ mod tests {
 
         let entry = DirectoryEntry::try_from_bytes(&bytes).unwrap();
 
-        assert_eq!(entry.inode_index, 123);
+        assert_eq!(entry.inode_index, InodeIndex(123));
         assert_eq!(entry.node_type, NodeType::Directory);
         assert_eq!(entry.name_length, 12);
         assert_eq!(&entry.name[0..12], b"applications");
@@ -1213,11 +1255,15 @@ mod tests {
     /// Verifies that a `Directory` (collection of entries) can be correctly serialized into a byte vector.
     #[test]
     fn serialize_directory_to_bytes() {
-        let name1 = Filename::try_from("file.txt".to_string()).unwrap();
-        let entry1 = DirectoryEntry::try_new(1, NodeType::File, name1).unwrap();
+        let name1 = EntryName::try_from("file.txt".to_string()).unwrap();
+        let entry1 =
+            DirectoryEntry::try_new(InodeIndex::try_new(1).unwrap(), NodeType::File, name1)
+                .unwrap();
 
-        let name2 = Filename::try_from("dir".to_string()).unwrap();
-        let entry2 = DirectoryEntry::try_new(2, NodeType::Directory, name2).unwrap();
+        let name2 = EntryName::try_from("dir".to_string()).unwrap();
+        let entry2 =
+            DirectoryEntry::try_new(InodeIndex::try_new(2).unwrap(), NodeType::Directory, name2)
+                .unwrap();
 
         let directory = Directory(vec![entry1, entry2]);
         let bytes = directory.to_bytes();
@@ -1259,12 +1305,12 @@ mod tests {
         let directory = Directory::try_from_bytes(&bytes).unwrap();
 
         assert_eq!(directory.len(), 2);
-        assert_eq!(directory[0].inode_index, 10);
+        assert_eq!(directory[0].inode_index, InodeIndex(10));
         assert_eq!(directory[0].node_type, NodeType::File);
         assert_eq!(directory[0].name_length, 9);
         assert_eq!(&directory[0].name[0..9], b"test1.txt");
 
-        assert_eq!(directory[1].inode_index, 20);
+        assert_eq!(directory[1].inode_index, InodeIndex(20));
         assert_eq!(directory[1].node_type, NodeType::Directory);
         assert_eq!(directory[1].name_length, 9);
         assert_eq!(&directory[1].name[0..9], b"test2.txt");
@@ -1313,7 +1359,7 @@ mod tests {
     fn img_file_disk_read_block() {
         let path = Path::new("test_read.img");
         let mut file = fs::File::create(path).unwrap();
-        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
+        let mut data = vec![0u8; (BLOCK_SIZE * BLOCK_COUNT) as usize];
         data[BLOCK_SIZE as usize] = 0xAB;
         data[BLOCK_SIZE as usize + 1] = 0xCD;
         file.write_all(&data).unwrap();
@@ -1356,7 +1402,7 @@ mod tests {
     fn img_file_disk_write_block() {
         let path = Path::new("test_write.img");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+        file.write_all(&vec![0u8; (BLOCK_SIZE * BLOCK_COUNT) as usize])
             .unwrap();
 
         let mut disk = ImgFileDisk::open(path).unwrap();
@@ -1402,7 +1448,7 @@ mod tests {
     fn img_file_disk_block_size() {
         let path = Path::new("test_blocksize.img");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+        file.write_all(&vec![0u8; (BLOCK_SIZE * BLOCK_COUNT) as usize])
             .unwrap();
 
         let disk = ImgFileDisk::open(path).unwrap();
@@ -1416,11 +1462,11 @@ mod tests {
     fn img_file_disk_total_blocks() {
         let path = Path::new("test_total_blocks.img");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+        file.write_all(&vec![0u8; (BLOCK_SIZE * BLOCK_COUNT) as usize])
             .unwrap();
 
         let disk = ImgFileDisk::open(path).unwrap();
-        assert_eq!(disk.total_blocks(), TOTAL_BLOCKS as usize);
+        assert_eq!(disk.block_count(), BLOCK_COUNT);
 
         fs::remove_file(path).unwrap();
     }
@@ -1431,14 +1477,14 @@ mod tests {
         let path = Path::new("test_format_clear.img");
         let mut file = fs::File::create(path).unwrap();
         // Write data into all blocks in the file
-        file.write_all(&vec![0xFF; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+        file.write_all(&vec![0xFF; (BLOCK_SIZE * BLOCK_COUNT) as usize])
             .unwrap();
 
         let mut disk = ImgFileDisk::open(path).unwrap();
         let mut buffer = BlockBuffer::new();
 
         // Ensure the data exists in the file
-        for block_index in 0..TOTAL_BLOCKS {
+        for block_index in 0..BLOCK_COUNT {
             disk.read_block(BlockIndex::try_new(block_index).unwrap(), &mut buffer)
                 .unwrap();
         }
@@ -1448,7 +1494,7 @@ mod tests {
         MyFS::format(&mut disk).unwrap();
 
         // Ensure the data is cleared after formatting
-        for block_index in 0..TOTAL_BLOCKS {
+        for block_index in 0..BLOCK_COUNT {
             disk.read_block(BlockIndex::try_new(block_index).unwrap(), &mut buffer)
                 .unwrap();
         }
@@ -1474,7 +1520,7 @@ mod tests {
         assert_eq!(superblock.magic_number, MAGIC_NUMBER);
         assert_eq!(superblock.version, 1);
         assert_eq!(superblock.block_size, BLOCK_SIZE);
-        assert_eq!(superblock.total_blocks, TOTAL_BLOCKS);
+        assert_eq!(superblock.total_blocks, BLOCK_COUNT);
         assert_eq!(superblock.inode_count, INODE_COUNT);
         assert_eq!(superblock.inode_size, INODE_SIZE);
         assert_eq!(*superblock.inode_bitmap_start, 1);
@@ -1569,7 +1615,7 @@ mod tests {
     fn myfs_mount_invalid_magic_number() {
         let path = Path::new("test_mount_invalid_magic.img");
         let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize])
+        file.write_all(&vec![0u8; (BLOCK_SIZE * BLOCK_COUNT) as usize])
             .unwrap();
 
         let disk = ImgFileDisk::open(path).unwrap();
@@ -1591,13 +1637,13 @@ mod tests {
         let mut file = fs::File::create(path).unwrap();
 
         // Write superblock manually
-        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
+        let mut data = vec![0u8; (BLOCK_SIZE * BLOCK_COUNT) as usize];
         data[0..4].copy_from_slice(&MAGIC_NUMBER.to_le_bytes());
         data[4..8].copy_from_slice(&1u32.to_le_bytes()); // version
-        data[8..12].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
-        data[12..16].copy_from_slice(&(TOTAL_BLOCKS as u32).to_le_bytes());
-        data[16..20].copy_from_slice(&(INODE_COUNT as u32).to_le_bytes());
-        data[20..24].copy_from_slice(&(INODE_SIZE as u32).to_le_bytes());
+        data[8..12].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
+        data[12..16].copy_from_slice(&BLOCK_COUNT.to_le_bytes());
+        data[16..20].copy_from_slice(&INODE_COUNT.to_le_bytes());
+        data[20..24].copy_from_slice(&INODE_SIZE.to_le_bytes());
         data[24..28].copy_from_slice(&1u32.to_le_bytes()); // inode_bitmap_start
         data[28..32].copy_from_slice(&2u32.to_le_bytes()); // block_bitmap_start
         data[32..36].copy_from_slice(&3u32.to_le_bytes()); // inode_table_start
@@ -1610,7 +1656,7 @@ mod tests {
         assert_eq!(fs.superblock.magic_number, MAGIC_NUMBER);
         assert_eq!(fs.superblock.version, 1);
         assert_eq!(fs.superblock.block_size, BLOCK_SIZE);
-        assert_eq!(fs.superblock.total_blocks, TOTAL_BLOCKS);
+        assert_eq!(fs.superblock.total_blocks, BLOCK_COUNT);
         assert_eq!(fs.superblock.inode_count, INODE_COUNT);
         assert_eq!(fs.superblock.inode_size, INODE_SIZE);
         assert_eq!(
@@ -1640,13 +1686,13 @@ mod tests {
         let mut file = fs::File::create(path).unwrap();
 
         // Write superblock and inode bitmap manually
-        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
+        let mut data = vec![0u8; (BLOCK_SIZE * BLOCK_COUNT) as usize];
         data[0..4].copy_from_slice(&MAGIC_NUMBER.to_le_bytes());
         data[4..8].copy_from_slice(&1u32.to_le_bytes());
-        data[8..12].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
-        data[12..16].copy_from_slice(&(TOTAL_BLOCKS as u32).to_le_bytes());
-        data[16..20].copy_from_slice(&(INODE_COUNT as u32).to_le_bytes());
-        data[20..24].copy_from_slice(&(INODE_SIZE as u32).to_le_bytes());
+        data[8..12].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
+        data[12..16].copy_from_slice(&BLOCK_COUNT.to_le_bytes());
+        data[16..20].copy_from_slice(&INODE_COUNT.to_le_bytes());
+        data[20..24].copy_from_slice(&INODE_SIZE.to_le_bytes());
         data[24..28].copy_from_slice(&1u32.to_le_bytes());
         data[28..32].copy_from_slice(&2u32.to_le_bytes());
         data[32..36].copy_from_slice(&3u32.to_le_bytes());
@@ -1672,13 +1718,13 @@ mod tests {
         let mut file = fs::File::create(path).unwrap();
 
         // Write superblock and block bitmap manually
-        let mut data = vec![0u8; BLOCK_SIZE as usize * TOTAL_BLOCKS as usize];
+        let mut data = vec![0u8; BLOCK_SIZE as usize * BLOCK_COUNT as usize];
         data[0..4].copy_from_slice(&MAGIC_NUMBER.to_le_bytes());
         data[4..8].copy_from_slice(&1u32.to_le_bytes());
-        data[8..12].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
-        data[12..16].copy_from_slice(&(TOTAL_BLOCKS as u32).to_le_bytes());
-        data[16..20].copy_from_slice(&(INODE_COUNT as u32).to_le_bytes());
-        data[20..24].copy_from_slice(&(INODE_SIZE as u32).to_le_bytes());
+        data[8..12].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
+        data[12..16].copy_from_slice(&BLOCK_COUNT.to_le_bytes());
+        data[16..20].copy_from_slice(&INODE_COUNT.to_le_bytes());
+        data[20..24].copy_from_slice(&INODE_SIZE.to_le_bytes());
         data[24..28].copy_from_slice(&1u32.to_le_bytes());
         data[28..32].copy_from_slice(&2u32.to_le_bytes());
         data[32..36].copy_from_slice(&3u32.to_le_bytes());
@@ -1708,13 +1754,13 @@ mod tests {
         let mut file = fs::File::create(path).unwrap();
 
         // Write superblock manually
-        let mut data = vec![0u8; (BLOCK_SIZE * TOTAL_BLOCKS) as usize];
+        let mut data = vec![0u8; (BLOCK_SIZE * BLOCK_COUNT) as usize];
         data[0..4].copy_from_slice(&MAGIC_NUMBER.to_le_bytes());
         data[4..8].copy_from_slice(&1u32.to_le_bytes()); // version
-        data[8..12].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
-        data[12..16].copy_from_slice(&(TOTAL_BLOCKS as u32).to_le_bytes());
-        data[16..20].copy_from_slice(&(INODE_COUNT as u32).to_le_bytes());
-        data[20..24].copy_from_slice(&(INODE_SIZE as u32).to_le_bytes());
+        data[8..12].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
+        data[12..16].copy_from_slice(&BLOCK_COUNT.to_le_bytes());
+        data[16..20].copy_from_slice(&INODE_COUNT.to_le_bytes());
+        data[20..24].copy_from_slice(&INODE_SIZE.to_le_bytes());
         data[24..28].copy_from_slice(&1u32.to_le_bytes()); // inode_bitmap_start
         data[28..32].copy_from_slice(&2u32.to_le_bytes()); // block_bitmap_start
         data[32..36].copy_from_slice(&3u32.to_le_bytes()); // inode_table_start
@@ -1741,7 +1787,7 @@ mod tests {
 
         let result = fs.resolve_path("/");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0);
+        assert_eq!(result.unwrap(), InodeIndex(0));
 
         fs::remove_file(path).unwrap();
     }
@@ -1758,8 +1804,10 @@ mod tests {
         let mut block_buffer = BlockBuffer::new();
 
         // Create a directory entry in root
-        let name = Filename::try_from("dir".to_string()).unwrap();
-        let entry = DirectoryEntry::try_new(1, NodeType::Directory, name).unwrap();
+        let name = EntryName::try_from("dir".to_string()).unwrap();
+        let entry =
+            DirectoryEntry::try_new(InodeIndex::try_new(1).unwrap(), NodeType::Directory, name)
+                .unwrap();
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
         block_buffer[0..dir_bytes.len()].copy_from_slice(&dir_bytes);
@@ -1772,7 +1820,10 @@ mod tests {
         fs.inode_bitmap.set_bit(1);
         block_buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
-            .write_block(BlockIndex::try_new(INODE_BITMAP_BLOCK_INDEX).unwrap(), &mut block_buffer)
+            .write_block(
+                BlockIndex::try_new(INODE_BITMAP_BLOCK_INDEX).unwrap(),
+                &mut block_buffer,
+            )
             .unwrap();
         block_buffer.clear();
 
@@ -1783,7 +1834,10 @@ mod tests {
         let inode_table_bytes = fs.inodes.to_bytes();
         block_buffer[0..inode_table_bytes.len()].copy_from_slice(&inode_table_bytes);
         fs.device
-            .write_block(BlockIndex::try_new(INODE_TABLE_BLOCK_INDEX).unwrap(), &mut block_buffer)
+            .write_block(
+                BlockIndex::try_new(INODE_TABLE_BLOCK_INDEX).unwrap(),
+                &mut block_buffer,
+            )
             .unwrap();
 
         // Reload filesystem
@@ -1793,7 +1847,7 @@ mod tests {
         let result = fs.resolve_path("/dir");
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 1);
+        assert_eq!(result.unwrap(), InodeIndex(1));
 
         fs::remove_file(path).unwrap();
     }
@@ -1809,25 +1863,41 @@ mod tests {
         let mut fs = MyFS::mount(disk).unwrap();
 
         // Create first level directory entry in root (inode 1, block 4)
-        let name1 = Filename::try_from("dir".to_string()).unwrap();
-        let entry1 = DirectoryEntry::try_new(ROOT_DIR_INODE_INDEX + 1, NodeType::Directory, name1).unwrap();
+        let name1 = EntryName::try_from("dir".to_string()).unwrap();
+        let entry1 = DirectoryEntry::try_new(
+            InodeIndex::try_new(ROOT_DIR_INODE_INDEX + 1).unwrap(),
+            NodeType::Directory,
+            name1,
+        )
+        .unwrap();
         let directory1 = Directory(vec![entry1]);
         let dir_bytes1 = directory1.to_bytes();
         let mut buffer = BlockBuffer::new();
         buffer[0..dir_bytes1.len()].copy_from_slice(&dir_bytes1);
         fs.device
-            .write_block(BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX).unwrap(), &mut buffer)
+            .write_block(
+                BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX).unwrap(),
+                &mut buffer,
+            )
             .unwrap();
 
         // Create second level directory entry (inode 2, block 5)
-        let name2 = Filename::try_from("subdir".to_string()).unwrap();
-        let entry2 = DirectoryEntry::try_new(ROOT_DIR_INODE_INDEX + 2, NodeType::Directory, name2).unwrap();
+        let name2 = EntryName::try_from("subdir".to_string()).unwrap();
+        let entry2 = DirectoryEntry::try_new(
+            InodeIndex::try_new(ROOT_DIR_INODE_INDEX + 2).unwrap(),
+            NodeType::Directory,
+            name2,
+        )
+        .unwrap();
         let directory2 = Directory(vec![entry2]);
         let dir_bytes2 = directory2.to_bytes();
         buffer.clear();
         buffer[0..dir_bytes2.len()].copy_from_slice(&dir_bytes2);
         fs.device
-            .write_block(BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX + 1).unwrap(), &mut buffer)
+            .write_block(
+                BlockIndex::try_new(ROOT_DIR_BLOCK_INDEX + 1).unwrap(),
+                &mut buffer,
+            )
             .unwrap();
 
         // Set inodes in bitmap. Index 1 for dir, index 2 for subdir
@@ -1836,7 +1906,10 @@ mod tests {
         buffer.clear();
         buffer.copy_from_slice(&fs.inode_bitmap);
         fs.device
-            .write_block(BlockIndex::try_new(INODE_BITMAP_BLOCK_INDEX).unwrap(), &mut buffer)
+            .write_block(
+                BlockIndex::try_new(INODE_BITMAP_BLOCK_INDEX).unwrap(),
+                &mut buffer,
+            )
             .unwrap();
 
         // Set blocks in bitmap. Block 4 for dir, block 5 for subdir
@@ -1846,7 +1919,10 @@ mod tests {
         buffer.clear();
         buffer.copy_from_slice(&fs.block_bitmap);
         fs.device
-            .write_block(BlockIndex::try_new(BLOCK_BITMAP_BLOCK_INDEX).unwrap(), &mut buffer)
+            .write_block(
+                BlockIndex::try_new(BLOCK_BITMAP_BLOCK_INDEX).unwrap(),
+                &mut buffer,
+            )
             .unwrap();
         buffer.clear();
 
@@ -1867,7 +1943,7 @@ mod tests {
 
         let result = fs.resolve_path("/dir/subdir");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 2);
+        assert_eq!(result.unwrap(), InodeIndex(2));
 
         fs::remove_file(path).unwrap();
     }
@@ -1906,8 +1982,10 @@ mod tests {
         let mut fs = MyFS::mount(disk).unwrap();
 
         // Create a directory entry in root
-        let name = Filename::try_from("dir".to_string()).unwrap();
-        let entry = DirectoryEntry::try_new(1, NodeType::Directory, name).unwrap();
+        let name = EntryName::try_from("dir".to_string()).unwrap();
+        let entry =
+            DirectoryEntry::try_new(InodeIndex::try_new(1).unwrap(), NodeType::Directory, name)
+                .unwrap();
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
         let mut buffer = BlockBuffer::new();
@@ -1972,8 +2050,10 @@ mod tests {
         let mut fs = MyFS::mount(disk).unwrap();
 
         // Create a directory entry in root
-        let name = Filename::try_from("dir".to_string()).unwrap();
-        let entry = DirectoryEntry::try_new(1, NodeType::Directory, name).unwrap();
+        let name = EntryName::try_from("dir".to_string()).unwrap();
+        let entry =
+            DirectoryEntry::try_new(InodeIndex::try_new(1).unwrap(), NodeType::Directory, name)
+                .unwrap();
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
         let mut buffer = BlockBuffer::new();
@@ -2006,7 +2086,7 @@ mod tests {
 
         let result = fs.resolve_path("//dir//");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 1);
+        assert_eq!(result.unwrap(), InodeIndex(1));
 
         fs::remove_file(path).unwrap();
     }
@@ -2022,8 +2102,10 @@ mod tests {
         let mut fs = MyFS::mount(disk).unwrap();
 
         // Create a directory entry in root pointing to inode 1
-        let name = Filename::try_from("dir".to_string()).unwrap();
-        let entry = DirectoryEntry::try_new(1, NodeType::Directory, name).unwrap();
+        let name = EntryName::try_from("dir".to_string()).unwrap();
+        let entry =
+            DirectoryEntry::try_new(InodeIndex::try_new(1).unwrap(), NodeType::Directory, name)
+                .unwrap();
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
         let mut buffer = BlockBuffer::new();
@@ -2062,14 +2144,20 @@ mod tests {
         let mut fs = MyFS::mount(disk).unwrap();
 
         // Create multiple entries in root directory
-        let name1 = Filename::try_from("file1.txt".to_string()).unwrap();
-        let entry1 = DirectoryEntry::try_new(1, NodeType::File, name1).unwrap();
+        let name1 = EntryName::try_from("file1.txt".to_string()).unwrap();
+        let entry1 =
+            DirectoryEntry::try_new(InodeIndex::try_new(1).unwrap(), NodeType::File, name1)
+                .unwrap();
 
-        let name2 = Filename::try_from("dir1".to_string()).unwrap();
-        let entry2 = DirectoryEntry::try_new(2, NodeType::Directory, name2).unwrap();
+        let name2 = EntryName::try_from("dir1".to_string()).unwrap();
+        let entry2 =
+            DirectoryEntry::try_new(InodeIndex::try_new(2).unwrap(), NodeType::Directory, name2)
+                .unwrap();
 
-        let name3 = Filename::try_from("file2.txt".to_string()).unwrap();
-        let entry3 = DirectoryEntry::try_new(3, NodeType::File, name3).unwrap();
+        let name3 = EntryName::try_from("file2.txt".to_string()).unwrap();
+        let entry3 =
+            DirectoryEntry::try_new(InodeIndex::try_new(3).unwrap(), NodeType::File, name3)
+                .unwrap();
 
         let directory = Directory(vec![entry1, entry2, entry3]);
         let dir_bytes = directory.to_bytes();
@@ -2087,13 +2175,13 @@ mod tests {
         assert!(result.is_ok());
         let entries = result.unwrap();
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].inode_index, 1);
+        assert_eq!(entries[0].inode_index, InodeIndex(1));
         assert_eq!(entries[0].node_type, NodeType::File);
         assert_eq!(entries[0].name.to_string(), "file1.txt");
-        assert_eq!(entries[1].inode_index, 2);
+        assert_eq!(entries[1].inode_index, InodeIndex(2));
         assert_eq!(entries[1].node_type, NodeType::Directory);
         assert_eq!(entries[1].name.to_string(), "dir1");
-        assert_eq!(entries[2].inode_index, 3);
+        assert_eq!(entries[2].inode_index, InodeIndex(3));
         assert_eq!(entries[2].node_type, NodeType::File);
         assert_eq!(entries[2].name.to_string(), "file2.txt");
 
@@ -2111,8 +2199,10 @@ mod tests {
         let mut fs = MyFS::mount(disk).unwrap();
 
         // Create directory entry in root
-        let name1 = Filename::try_from("subdir".to_string()).unwrap();
-        let entry1 = DirectoryEntry::try_new(1, NodeType::Directory, name1).unwrap();
+        let name1 = EntryName::try_from("subdir".to_string()).unwrap();
+        let entry1 =
+            DirectoryEntry::try_new(InodeIndex::try_new(1).unwrap(), NodeType::Directory, name1)
+                .unwrap();
         let root_directory = Directory(vec![entry1]);
         let root_dir_bytes = root_directory.to_bytes();
         let mut buffer = BlockBuffer::new();
@@ -2122,8 +2212,10 @@ mod tests {
             .unwrap();
 
         // Create entries in subdirectory
-        let name2 = Filename::try_from("nested_file.txt".to_string()).unwrap();
-        let entry2 = DirectoryEntry::try_new(2, NodeType::File, name2).unwrap();
+        let name2 = EntryName::try_from("nested_file.txt".to_string()).unwrap();
+        let entry2 =
+            DirectoryEntry::try_new(InodeIndex::try_new(2).unwrap(), NodeType::File, name2)
+                .unwrap();
         let sub_directory = Directory(vec![entry2]);
         let sub_dir_bytes = sub_directory.to_bytes();
         buffer.clear();
@@ -2169,7 +2261,7 @@ mod tests {
         assert!(result.is_ok());
         let entries = result.unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].inode_index, 2);
+        assert_eq!(entries[0].inode_index, InodeIndex(2));
         assert_eq!(entries[0].node_type, NodeType::File);
         assert_eq!(entries[0].name.to_string(), "nested_file.txt");
 
@@ -2228,8 +2320,9 @@ mod tests {
         let mut fs = MyFS::mount(disk).unwrap();
 
         // Create a file entry in root
-        let name = Filename::try_from("file.txt".to_string()).unwrap();
-        let entry = DirectoryEntry::try_new(1, NodeType::File, name).unwrap();
+        let name = EntryName::try_from("file.txt".to_string()).unwrap();
+        let entry =
+            DirectoryEntry::try_new(InodeIndex::try_new(1).unwrap(), NodeType::File, name).unwrap();
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
         let mut buffer = BlockBuffer::new();
@@ -2281,8 +2374,10 @@ mod tests {
         let mut fs = MyFS::mount(disk).unwrap();
 
         // Create a directory entry in root pointing to inode 1
-        let name = Filename::try_from("dir".to_string()).unwrap();
-        let entry = DirectoryEntry::try_new(1, NodeType::Directory, name).unwrap();
+        let name = EntryName::try_from("dir".to_string()).unwrap();
+        let entry =
+            DirectoryEntry::try_new(InodeIndex::try_new(1).unwrap(), NodeType::Directory, name)
+                .unwrap();
         let directory = Directory(vec![entry]);
         let dir_bytes = directory.to_bytes();
         let mut buffer = BlockBuffer::new();
